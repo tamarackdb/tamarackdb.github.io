@@ -239,7 +239,7 @@ call commits on its own. Outside a pause, it gets <code>409 NotPaused</code> (se
 deletes every projection. Both take no ticket, are accepted only while the server is paused, and respond <code>204 No Content</code>. Outside a pause, they get <code>409 NotPaused</code>.</p><p><strong>What a projection may depend on.</strong> Events are appended before the event handlers run, and <code>POST /events</code> returns each
 event&rsquo;s <code>sequence</code> and <code>time</code>. A projection can depend on anything in an event, those two values included. A rebuild
 reads the same events back from <code>QUERY /events</code>, with the same values, so it produces the same projections.</p><h3 id=pause>Pause<a href=#pause class=anchor aria-hidden=true>#</a></h3><p>A pause stops the server from giving out tickets. It guarantees that no transaction is active while a projection
-rebuild runs.</p><p><strong><code>POST /pause</code></strong> joins the FIFO like a <code>POST /begin</code> request: it&rsquo;s subject to the same maximum wait, and a
+rebuild runs.</p><p><strong><code>POST /pause</code></strong> joins the FIFO like a <code>POST /begin</code> request: it&rsquo;s subject to the same FIFO depth limit, and a
 client that disconnects while waiting leaves the FIFO, with no pause. When its turn comes, it opens no SQLite
 transaction. It writes the pause file, switches the server to paused, gives its turn to the next request in the FIFO,
 and responds <code>204 No Content</code>. The response therefore arrives only once every transaction ahead of it has ended.
@@ -342,10 +342,13 @@ the transaction timeouts, and the pagination/event-size/queue-depth limits. This
 checking at a glance what a given instance is actually set up to do, not a machine-readable format meant for parsing.</p><p>Opening the store checks the schema version (see Schema), then reads the current highest <code>sequence</code> in the <code>events</code>
 table into the in-memory Sequence Position counter (see Application-controlled Sequence Position above). The process
 then checks for the pause file in <code>dataDir</code>, and starts paused if it exists (see Pause). All of this finishes before the
-process gives out any ticket; reads without a ticket can be served as soon as the store is open.</p><p>On <code>SIGINT</code> or <code>SIGTERM</code>, the process shuts down in order: the HTTP server stops taking new connections and finishes
-requests already in flight (<code>http.Server.Shutdown</code>, capped at 10 seconds), requests still waiting in the FIFO are
-turned away, the active transaction, if any, is rolled back, the queue manager closes, then the SQLite store closes,
-releasing its connections and the <code>.lock</code> file. A transaction is never committed on shutdown: only its client can
+process gives out any ticket; reads without a ticket can be served as soon as the store is open.</p><p>On <code>SIGINT</code> or <code>SIGTERM</code>, the process shuts down in order. The HTTP server stops taking new connections
+(<code>http.Server.Shutdown</code>, capped at 10 seconds). At the same moment, the queue manager closes: requests still waiting
+in the FIFO are turned away, no new ticket is given out, and the active transaction, if any, is rolled back once a
+call already running with it finishes. The HTTP server then finishes the requests still in flight, and the SQLite
+store closes last, releasing its connections and the <code>.lock</code> file. The FIFO has to close first: a request waiting in
+it only ends once it gets its turn, so the HTTP server would otherwise wait for it, and hand out tickets that no
+client can use any more. A transaction is never committed on shutdown: only its client can
 decide to commit. A fatal storage error found mid-flight (see Fatal storage errors below) drives this same ordered
 shutdown, instead of an abrupt exit. The HTTP server also sets <code>ReadHeaderTimeout</code> to 10 seconds, closing a connection
 that never finishes sending its request headers, instead of holding it open forever.</p><p>The queue manager&rsquo;s state (the active transaction, its ticket and deadline, the requests waiting) is purely
@@ -442,11 +445,12 @@ real event), rather than serving any real functional need, since events are appe
 mode this design assumes throughout, for MVCC reads and checkpoint behavior) and <code>PRAGMA synchronous = FULL</code>. <code>FULL</code>
 costs one extra fsync per commit compared to the <code>NORMAL</code> mode WAL usually pairs with, but at this scope&rsquo;s write
 volume that cost doesn&rsquo;t matter, and it buys the strongest durability SQLite offers, for what is, for each
-application, its single source of truth with no backup copy running behind it.</p><p>The write connection opens every transaction with <code>BEGIN IMMEDIATE</code> (<code>_txlock=immediate</code> in the DSN), taking SQLite&rsquo;s
+application, its single source of truth.</p><p>The write connection opens every transaction with <code>BEGIN IMMEDIATE</code> (<code>_txlock=immediate</code> in the DSN), taking SQLite&rsquo;s
 write lock at the start of the transaction, rather than waiting until the first write statement runs. For a transaction
 opened by <code>POST /begin</code>, that&rsquo;s the moment the ticket is given out: reads, checks, and inserts all run under the lock,
-with no window where another connection could slip in between them. A call accepted only while paused (<code>POST /projections</code>
-without a ticket, <code>DELETE /projections</code>) runs its own short <code>BEGIN IMMEDIATE</code> &mldr; <code>COMMIT</code>. No transaction can be active
+with no window where another connection could slip in between them. A call accepted only while paused runs in its own
+short transaction: <code>POST /projections</code> without a ticket as its own <code>BEGIN IMMEDIATE</code> &mldr; <code>COMMIT</code>, and
+<code>DELETE /projections</code> or <code>DELETE /projections/{type}</code> as a single statement that commits on its own. No transaction can be active
 while paused, and the pause can&rsquo;t end while such a call runs: it has the write connection to itself, apart from a
 <code>PRAGMA optimize</code> that waits its turn on the same single connection. The write connection also sets <code>_busy_timeout = 5000</code> (five seconds). Since <code>writeDB.SetMaxOpenConns(1)</code> already forces every write onto one connection, and the FIFO
 already lets only one transaction run at a time, the busy timeout only guards against something else briefly holding the
@@ -465,13 +469,15 @@ A database file that doesn&rsquo;t exist yet is created fresh, with the schema a
 existing file whose version doesn&rsquo;t match (older, from a schema that&rsquo;s since changed, or newer, from a downgraded
 binary) is fatal: the process logs it and refuses to start, the same treatment as any other storage integrity failure
 (see Startup, shutdown, and crash behavior). The TamarackDB server never changes its own schema.</p><h2 id=backup>Backup<a href=#backup class=anchor aria-hidden=true>#</a></h2><p><code>tamarackdb-backup</code> keeps a standing copy of an instance&rsquo;s events in a local SQLite file. It does one catch-up run and
-exits; a scheduler runs it again (see <a href=/docs/guides/backup/>Backup</a>). Each run:</p><ol><li>Opens the local file with <code>store.Open</code>, the same path the server uses: the file gets the server&rsquo;s schema, and the
+exits; a scheduler runs it again (see <a href=/docs/guides/backup/>Backup</a>). Each run:</p><ol><li>Creates the local file&rsquo;s directory if it doesn&rsquo;t exist yet, then opens the file with <code>store.Open</code>, the same path
+the server uses: the file gets the server&rsquo;s schema, and the
 run holds the file&rsquo;s <code>.lock</code> (see Storage: SQLite). A backup file can&rsquo;t be updated while a server is serving it.</li><li>Reads the highest Sequence Position already in the file.</li><li>Pages through the source&rsquo;s <code>QUERY /events</code>, without a ticket, with <code>afterSequence</code> set to that position and <code>limit</code>
 set to <code>pageLimit</code>. A read without a ticket sees committed events only, and never waits for the source&rsquo;s active
 transaction.</li><li>Writes each page with <code>Store.Import</code>, in one SQLite transaction per page. <code>Import</code> is a variant of <code>Append</code> that
 skips sequence reservation and the Append Condition check: each event keeps the <code>sequence</code> and <code>time</code> the source
 gave it. It then moves the local Sequence Position counter past the highest sequence imported.</li><li>Stops once a page&rsquo;s trailer reads <code>hasMore: false</code>.</li></ol><p>A page cut short (a response that ends without its trailer, see Response format) fails the run instead of importing a
-partial page. There&rsquo;s no retry inside a run: the error goes to stderr, with a non-zero exit code. Every page imported
+partial page. So does a page request that takes more than 5 minutes, so a source that stops answering never holds
+the backup file&rsquo;s lock past that. There&rsquo;s no retry inside a run: the error goes to stderr, with a non-zero exit code. Every page imported
 before the failure is already committed, so the next run resumes right after it.</p><p>The backup copies events only. Projections are left out on purpose: every projection can be rebuilt from events (see
 Projection rebuilds), so the backup file&rsquo;s <code>projections</code> table stays empty.</p><p>The result is a regular TamarackDB database file. Unlike a raw copy of the source&rsquo;s file, which can miss commits still
 in the WAL, it can be opened and served by <code>tamarackdb-server</code> as a live instance. The source must be reachable over
@@ -539,8 +545,8 @@ command that expired.</p><h3 id=queue-and-connection-pool-observability>Queue an
 own content) are a query away, straight against the SQLite file, so the store doesn&rsquo;t need to expose them itself. What
 the file can&rsquo;t answer is live, in-memory state that only exists for the life of the process: the active transaction,
 the FIFO, the pause state, and how busy the read and write SQLite connection pools are. Two endpoints cover that, kept
-separate since they serve different needs:</p><p><strong><code>GET /metrics</code></strong>: Prometheus exposition format, for scraping into existing monitoring:</p><ul><li><code>tamarackdb_paused</code> (gauge): whether the server is paused (<code>1</code>) or not (<code>0</code>)</li><li><code>tamarackdb_transaction_active</code> (gauge): whether a transaction is currently active (<code>1</code>) or not (<code>0</code>)</li><li><code>tamarackdb_requests_queued</code> (gauge): number of requests (<code>POST /begin</code> or <code>POST /pause</code>) currently waiting in
-the FIFO</li><li><code>tamarackdb_queue_longest_wait_seconds</code> (gauge): longest current wait, in seconds, among queued requests; <code>0</code> when
+separate since they serve different needs:</p><p><strong><code>GET /metrics</code></strong>: Prometheus exposition format, for scraping into existing monitoring:</p><ul><li><code>tamarackdb_paused</code> (gauge): whether the server is paused (<code>1</code>) or not (<code>0</code>)</li><li><code>tamarackdb_transaction_active</code> (gauge): whether a transaction is currently active (<code>1</code>) or not (<code>0</code>)</li><li><code>tamarackdb_requests_queued</code> (gauge): number of requests (<code>POST /begin</code>, <code>POST /pause</code>, or the hourly
+<code>PRAGMA optimize</code>) currently waiting in the FIFO</li><li><code>tamarackdb_queue_longest_wait_seconds</code> (gauge): longest current wait, in seconds, among queued requests; <code>0</code> when
 the FIFO is empty</li><li><code>tamarackdb_transactions_started_total</code> (counter): total transactions given a ticket since startup</li><li><code>tamarackdb_transactions_committed_total</code> (counter): total transactions committed since startup</li><li><code>tamarackdb_transactions_rolled_back_total</code> (counter, label <code>reason</code>): total transactions rolled back since startup,
 by reason: <code>client</code> (<code>POST /rollback</code>), <code>error</code> (a failed call), <code>expired</code> (deadline or ceiling), <code>shutdown</code>, <code>reset</code></li><li><code>tamarackdb_transaction_duration_seconds</code> (histogram): time from ticket to end, for every transaction, however it
 ended</li><li><code>tamarackdb_appends_failed_total</code> (counter): total <code>POST /events</code> calls that failed on their Append Condition
