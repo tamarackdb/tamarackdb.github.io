@@ -268,8 +268,8 @@ Key words in capitals follow [RFC 2119](https://tamarackdb.github.io/docs/concep
 
 ## The life of a transaction
 
-1. **Begin.** The server returns a transaction ID, and keeps the current [store ID](https://tamarackdb.github.io/docs/concepts/store-id/) with
-   it.
+1. **Begin.** The server returns a transaction ID. While a [pause](https://tamarackdb.github.io/docs/http-api/pause/) is requested or in place, no
+   transaction begins.
 2. **Decisions.** Each decision reads events, then writes its events, or none.
 3. **Projections.** Between two decisions, the application reads and writes projections.
 4. **Commit.** The server checks every decision and every projection, then writes everything at once, or nothing.
@@ -327,7 +327,7 @@ What a projection may use is in [Projections](https://tamarackdb.github.io/docs/
 ## The commit
 
 - The commit waits for its turn, behind the writes that arrived before it, like any write.
-- In its turn, the server checks the store ID, then every condition, then every projection. Then the events get their
+- In its turn, the server checks every condition, then every projection. Then the events get their
   Sequence Positions, and everything is written. All of it, or none of it.
 - A condition fails if an event that matches its query was committed after the position its read reached. The `409`
   names it by its rank among the transaction's reads: `conditions[0]` is the first.
@@ -498,9 +498,8 @@ Key words in capitals follow [RFC 2119](https://tamarackdb.github.io/docs/concep
 
 - In the `X-Tamarackdb-Store` header of every response that depends on the store (see
   [Conventions](https://tamarackdb.github.io/docs/http-api/conventions/#store-id-header)).
-- Not in a transaction. The server keeps the store ID current at its begin, and the client never handles it. Once
-  the store ID changes, the next call on the transaction gets `409`, and the transaction ends (see
-  [Transactions](https://tamarackdb.github.io/docs/concepts/transactions/)).
+- Not in a transaction. The store ID never changes while a transaction lives: a reset only happens during a
+  [pause](https://tamarackdb.github.io/docs/http-api/pause/), when no transaction exists.
 
 ## Positions
 
@@ -549,8 +548,8 @@ on. The client never builds or sends a condition: the server builds one from eac
   `409` names it by the rank of its read: `conditions[1] no longer holds` for the second read.
 - The server checks conditions against committed events only, in the same SQLite transaction as the inserts. Nothing
   can slip in between the checks and the inserts: writes are served one at a time, in the order they arrive.
-- A Sequence Position only means something next to its store ID. A transaction begun before a reset gets `409` (see
-  [Store ID](https://tamarackdb.github.io/docs/concepts/store-id/)).
+- A Sequence Position only means something next to its store ID. The store ID never changes while a transaction
+  lives (see [Store ID](https://tamarackdb.github.io/docs/concepts/store-id/)).
 
 **Why a list.** Each read supports its own decision. Merging the conditions into one, with OR, would refuse a commit
 whenever any of the queries matched anything after the earliest position. A list is more precise, and still never a
@@ -657,6 +656,10 @@ replaying every event in order, several threads in parallel, or anything else. I
    write or several. A projection is a `create` the first time, then a `replace` with the version the previous write
    returned.
 
+Commands keep appending events while a rebuild runs. To rebuild up to a fixed point, with no event missed,
+[pause](https://tamarackdb.github.io/docs/http-api/pause/) transactions first: call `POST /pause` until it answers `200`, with the last Sequence
+Position, where the replay stops. Resume once the projections are written.
+
 One write or several is the application's choice:
 
 - **One write** MUST fit under `maxProjectionsPerWrite` and `maxRequestBodySize`. It holds the write turn for as long
@@ -700,6 +703,7 @@ Key words in capitals follow [RFC 2119](https://tamarackdb.github.io/docs/concep
 | [`GET /projections/{type}/{id}`](https://tamarackdb.github.io/docs/http-api/projections/#reading-a-projection) | Read one committed projection |
 | [`DELETE /projections/{type}`](https://tamarackdb.github.io/docs/http-api/projections/#bulk-delete) | Delete every projection of one type, in its turn |
 | [`DELETE /projections`](https://tamarackdb.github.io/docs/http-api/projections/#bulk-delete) | Delete every projection, in its turn |
+| [`POST /pause`](https://tamarackdb.github.io/docs/http-api/pause/) and `POST /resume` | Stop transactions from beginning, in its turn, and let them begin again |
 | [`POST /reset`](https://tamarackdb.github.io/docs/http-api/reset/) | Delete all events and projections and draw a new store ID, in its turn (development mode only) |
 
 - "In its turn" means the request waits behind the requests that arrived before it: the server runs them one at a
@@ -743,8 +747,8 @@ request behind it, for as long as it likes.
 
 ## Waiting for a turn
 
-These requests wait for their turn: a transaction's commit, `POST /projections`, the bulk deletes of projections, and
-`POST /reset`.
+These requests wait for their turn: a transaction's commit, `POST /projections`, the bulk deletes of projections,
+`POST /pause` and `POST /resume`, and `POST /reset`.
 
 - They go through one at a time, in the order they arrive. Each waits, with its connection held open, behind the
   requests that arrived before it.
@@ -772,8 +776,10 @@ that depends on the store:
 | `QUERY /events` | On every page, empty pages included |
 | `GET /projections/{type}/{id}` | On `200` and on `404` |
 | `POST /projections` | On `200` |
+| `POST /pause` | On `200` |
 
-- No transaction endpoint carries it: the server keeps the store ID with the transaction.
+- No transaction endpoint carries it: the store ID never changes while a transaction lives (see
+  [Store ID](https://tamarackdb.github.io/docs/concepts/store-id/)).
 - A read takes the store ID in the same SQLite snapshot as the events or the projection it returns, so a response
   never pairs the data of one store ID with another.
 - A write takes it in the same SQLite transaction as what it wrote.
@@ -980,6 +986,9 @@ curl -X POST http://127.0.0.1:8085/tx
 
 The `txId` is a UUID. Every other endpoint of the transaction takes it in its path.
 
+While a pause is requested or in place, `POST /tx` gets `503 Paused`, and no transaction begins (see
+[Pause](https://tamarackdb.github.io/docs/http-api/pause/)).
+
 ## Reading events
 
 ```sh
@@ -1099,7 +1108,6 @@ A conflict gets `409 ConcurrencyException`, and nothing is written. The `message
 | An event that matches the query of the transaction's third read was committed after that read | `conditions[2] no longer holds` |
 | A projection no longer has the version read | `projection show-seats/s1 no longer has the version read` |
 | A projection read as missing was created since | `projection seat-hold/s1-A6 was created by another write since it was read` |
-| The store was reset since the transaction began | `the transaction was begun on another store` |
 
 After a `409`, the client runs the whole command again, in a new transaction.
 
@@ -1162,8 +1170,9 @@ its work.
 |---|---|---|
 | `400` | `InvalidRequest` | A malformed body, a call that breaks a rule of transactions, or a call over a [limit](#limits). The `message` names the rule or the setting, for example `events written without a read` |
 | `404` | `TransactionNotFound` | The transaction is unknown, expired, or already over |
+| `503` | `Paused` | `POST /tx` while a pause is requested or in place |
 | `404` | `ProjectionNotFound` | [Reading a projection](#reading-a-projection) that doesn't exist |
-| `409` | `ConcurrencyException` | At commit, a [conflict](#commit). On any call, a store reset since the transaction began |
+| `409` | `ConcurrencyException` | At commit, a [conflict](#commit) |
 | `413` | `PayloadTooLarge` | An event or a projection over its size limit, or a body over `maxRequestBodySize` |
 
 Every error but `404 ProjectionNotFound` ends the transaction. The full list of codes is in
@@ -1316,6 +1325,122 @@ curl -X DELETE http://127.0.0.1:8085/projections
 
 ---
 
+# Pause
+
+Source: https://tamarackdb.github.io/docs/http-api/pause/
+
+`POST /pause` stops transactions from beginning, and `POST /resume` lets them begin again. Events enter the log only
+through a transaction: during a pause, no event is appended. Everything else goes on.
+
+A pause serves an operation that needs the log to stand still:
+
+- **A fixed point.** `POST /pause` returns the last Sequence Position, once the pause is in place. No event comes
+  after it until `/resume`, so every projector can catch up to it.
+- **A rebuild with no event missed.** Pause, delete the projections with a
+  [bulk delete](https://tamarackdb.github.io/docs/http-api/projections/#bulk-delete), write them again with
+  [`POST /projections`](https://tamarackdb.github.io/docs/http-api/projections/#writing-projections) up to the last Sequence Position, then resume.
+- **A deploy.** Pause, switch the application to its new version, then resume: no command decides an event on the old
+  version that the new one would read.
+
+TamarackDB doesn't know why a pause is asked for, and never ends one on its own. A single process of the application
+coordinates `/pause` and `/resume`: the pause has no owner, and the first `/resume` ends it for everyone.
+
+Key words in capitals follow [RFC 2119](https://tamarackdb.github.io/docs/concepts/overview/#key-words).
+
+## `POST /pause`
+
+```sh
+curl -X POST http://127.0.0.1:8085/pause
+```
+
+Each call waits for its turn (see [Waiting for a turn](https://tamarackdb.github.io/docs/http-api/conventions/#waiting-for-a-turn)). In its turn,
+it looks at where the pause stands, and answers without waiting for anything else:
+
+- **Transactions are still open.** The pause is requested, if it isn't already: from then on, `POST /tx` gets
+  `503 Paused`. The open transactions go on normally, up to their commit. The response is `202 Accepted`, with how
+  many are open:
+
+  ```json
+  {"openTransactions":3}
+  ```
+
+- **No transaction is open.** The pause takes hold. The response is `200 OK`, with the last Sequence Position, and the
+  store ID in the `X-Tamarackdb-Store` header. The events of every transaction that has ended come before that
+  position.
+
+  ```
+  200 OK
+  X-Tamarackdb-Store: 5b0c7e2a-1f4d-4a9b-8c3e-6d2f1a0b9e47
+
+  {"lastSequence":5042}
+  ```
+
+- **The pause is in place.** `/pause` does nothing, and responds `200` with the same last Sequence Position.
+
+The coordinator MUST call `/pause` again, after a short delay, until it gets `200`:
+
+```sh
+pause() { curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8085/pause; }
+until [ "$(pause)" = 200 ]; do sleep 1; done
+```
+
+- `200` always means the pause is in place.
+- A lost response is settled by calling `/pause` again: it answers `200` with the same last Sequence Position.
+- `503 WriteQueueFull` or `503 ShuttingDown`: nothing changes, and the coordinator calls again.
+- A requested pause stays until `/resume` withdraws it. A coordinator that dies during its loop leaves it in place,
+  like a forgotten pause: [`GET /stats`](https://tamarackdb.github.io/docs/operations/observability/) shows it.
+
+**Why wait for the open transactions.** A command that began before the pause goes to the end, and its work isn't
+lost. And during a pause, no transaction exists: the rule has no exception.
+
+**Why the coordinator calls again.** A `/pause` that waited in the server would hold a connection for as long as the
+transactions last. Answering at once keeps nothing on the server between two calls. The coordinator is a central
+process that already drives the whole operation: a loop costs it little.
+
+## `POST /resume`
+
+```sh
+curl -X POST http://127.0.0.1:8085/resume
+```
+
+- Without a pause, it does nothing, and responds `204 No Content` at once.
+- Otherwise, it waits for its turn, then ends the pause, or the requested pause, and responds `204`. Transactions can
+  begin again.
+- It can get `503 WriteQueueFull` or `503 ShuttingDown`, like any request that waits for its turn. Nothing changes
+  then.
+
+**Why it waits for its turn.** `/pause` and `/resume` both go through the queue: they never cross. Each one finds, in
+its turn, the state the other left, and does what it would do on its own.
+
+## What a pause blocks
+
+During a pause, `POST /tx` gets `503 Paused`, and nothing else is refused:
+
+- reads of events and of projections;
+- `POST /projections`, and the bulk deletes of projections;
+- `GET /health` and `GET /stats`;
+- `POST /reset`, in development mode, which is accepted only during a pause, and leaves it in place.
+
+What an application does with a command refused by `503 Paused` is up to it.
+
+**Why projections go on.** A pause holds the log still, not the projections. An operation run during a pause, a
+rebuild for example, has to write them.
+
+## How long it lasts
+
+- A pause lasts until `POST /resume`. The server never ends one on its own.
+- A pause survives a restart of the server. A requested pause doesn't: the server restarts without one, and the
+  coordinator calls `/pause` again.
+- A backup never copies the pause (see [Backup](https://tamarackdb.github.io/docs/operations/backup/)).
+
+**Why it survives a restart.** An operation relies on it. If the server restarted during a rebuild and lost the
+pause, commands could append events the rebuild would never see.
+
+A pause in place shows in [`GET /health`](https://tamarackdb.github.io/docs/operations/health-check/), and a requested one in
+[`GET /stats`](https://tamarackdb.github.io/docs/operations/observability/).
+
+---
+
 # Reset
 
 Source: https://tamarackdb.github.io/docs/http-api/reset/
@@ -1323,8 +1448,13 @@ Source: https://tamarackdb.github.io/docs/http-api/reset/
 `POST /reset` empties the store, for tests. It exists only in development mode (see
 [Development mode](https://tamarackdb.github.io/docs/operations/dev-mode/)). Never rely on it against a production instance.
 
+It's accepted only during a [pause](https://tamarackdb.github.io/docs/http-api/pause/). A test suite resets the store between two tests with three
+calls:
+
 ```sh
+curl -X POST http://127.0.0.1:8085/pause
 curl -X POST http://127.0.0.1:8085/reset
+curl -X POST http://127.0.0.1:8085/resume
 ```
 
 ## What it does
@@ -1332,10 +1462,16 @@ curl -X POST http://127.0.0.1:8085/reset
 - In one SQLite transaction, it deletes every event and every projection, sets the Sequence Position counter back so
   the next event gets sequence 1, and draws a new store ID (see [Store ID](https://tamarackdb.github.io/docs/concepts/store-id/)).
 - It responds `204 No Content`.
+- Outside a pause in place, a requested one included, it gets `409 NotPaused`, and nothing changes.
+- It leaves the pause in place: `POST /resume` lets transactions begin again.
 - For the application, a reset is like a restart of the server on a brand new file.
 
 A client library's test suite can start each test, or each run, from an empty store instead of tracking what earlier
-tests left behind.
+tests left behind. A transaction left open by a failed test holds the pause back until `txIdleTimeout`: a test suite
+can set it short.
+
+**Why only during a pause.** During a pause, no transaction exists: a reset never falls in the middle of one, and no
+transaction ever sees the store ID change.
 
 ## Its turn
 
@@ -1343,7 +1479,6 @@ A reset waits for its turn like a write (see [Waiting for a turn](https://tamara
 
 - The writes queued before it go through, then the reset deletes them.
 - A write queued after it runs on the new store:
-  - the commit of a transaction begun before the reset gets `409`;
   - a `replace` or `delete` in `POST /projections` gets `409`, since its version no longer exists;
   - a `create` in `POST /projections` goes through, on the new store.
 - A reset can get `503 WriteQueueFull`. Closing the connection while it waits takes it out of the queue, and nothing is
@@ -1378,11 +1513,13 @@ headers.
 | `401` | `Unauthorized` | A missing or invalid Bearer token, only when `enableAuth` is on (see [Security](https://tamarackdb.github.io/docs/operations/security/#bearer-token)) |
 | `404` | `ProjectionNotFound` | A projection that doesn't exist, read with `GET /projections/{type}/{id}` or in a transaction |
 | `404` | `TransactionNotFound` | A call on a transaction that is unknown, expired, or already over (see [Transactions](https://tamarackdb.github.io/docs/http-api/transactions/#errors)) |
-| `409` | `ConcurrencyException` | A commit or `POST /projections`: a condition doesn't hold, or a projection doesn't match the stored one. Any call on a transaction after a store reset. The `message` names the cause (see [Transactions](https://tamarackdb.github.io/docs/http-api/transactions/#commit) and [Projections](https://tamarackdb.github.io/docs/http-api/projections/#conflicts)). Nothing was written |
+| `409` | `ConcurrencyException` | A commit or `POST /projections`: a condition doesn't hold, or a projection doesn't match the stored one. The `message` names the cause (see [Transactions](https://tamarackdb.github.io/docs/http-api/transactions/#commit) and [Projections](https://tamarackdb.github.io/docs/http-api/projections/#conflicts)). Nothing was written |
+| `409` | `NotPaused` | `POST /reset` outside a pause in place (see [Reset](https://tamarackdb.github.io/docs/http-api/reset/)). Nothing was deleted |
 | `413` | `PayloadTooLarge` | An event or a projection over its size limit, or a body over `maxRequestBodySize`. The `message` names the setting |
 | `500` | `InternalError` | An unexpected failure on the server |
-| `503` | `WriteQueueFull` | A commit, `POST /projections`, a bulk delete, or `POST /reset`, while too many requests already wait for their turn (see [Conventions](https://tamarackdb.github.io/docs/http-api/conventions/#waiting-for-a-turn)). Nothing was written |
-| `503` | `ShuttingDown` | A commit, `POST /projections`, a bulk delete, or `POST /reset`, waiting or arriving while the server shuts down. Nothing was written |
+| `503` | `Paused` | `POST /tx` while a pause is requested or in place (see [Pause](https://tamarackdb.github.io/docs/http-api/pause/)). No transaction began |
+| `503` | `WriteQueueFull` | A commit, `POST /projections`, a bulk delete, `POST /pause`, `POST /resume`, or `POST /reset`, while too many requests already wait for their turn (see [Conventions](https://tamarackdb.github.io/docs/http-api/conventions/#waiting-for-a-turn)). Nothing was written |
+| `503` | `ShuttingDown` | A commit, `POST /projections`, a bulk delete, `POST /pause`, `POST /resume`, or `POST /reset`, waiting or arriving while the server shuts down. Nothing was written |
 | `503` | `Unavailable` | `GET /health` only: SQLite can't be reached (see [Health check](https://tamarackdb.github.io/docs/operations/health-check/)) |
 
 How each code is logged is in [Logs](https://tamarackdb.github.io/docs/operations/logs/).
@@ -1733,6 +1870,8 @@ Key words in capitals follow [RFC 2119](https://tamarackdb.github.io/docs/concep
 - A projection MUST be read in the transaction before it's written.
 - After a `409`, or a `404 TransactionNotFound`, the client MUST run the whole command again, in a new transaction.
   Any error ends a transaction (see [Transactions](https://tamarackdb.github.io/docs/concepts/transactions/#the-end-of-a-transaction)).
+- `POST /tx` can get `503 Paused` while a [pause](https://tamarackdb.github.io/docs/http-api/pause/) is requested or in place. No transaction
+  began. What to do with the command is the application's choice.
 - A client SHOULD abandon a transaction it no longer needs, for example in the error handler around a command.
 - A client SHOULD give each event of a write the `time` the write returned, before the code that reacts to it runs:
   it's the `time` the event will carry once committed.
@@ -1749,7 +1888,8 @@ Key words in capitals follow [RFC 2119](https://tamarackdb.github.io/docs/concep
 
 ## Testing
 
-- [`POST /reset`](https://tamarackdb.github.io/docs/http-api/reset/), in development mode, empties the store between tests.
+- [`POST /reset`](https://tamarackdb.github.io/docs/http-api/reset/), in development mode, empties the store between tests, during a pause:
+  `POST /pause`, `POST /reset`, then `POST /resume`.
 - [`testdata/query-cases.json`](https://github.com/tamarackdb/tamarackdb/blob/main/testdata/query-cases.json) holds
   queries, events, and whether each query selects each event, in the shapes of the HTTP API.
 
@@ -2063,8 +2203,8 @@ A file that holds `authToken` is a secret: see [Security](https://tamarackdb.git
 ## Sizing the write queue
 
 `maxQueuedWrites` bounds how many requests wait for their turn at once: a transaction's commit, `POST /projections`,
-the bulk deletes of projections, `POST /reset`, and the hourly `PRAGMA optimize`. They're served one at a time, in the
-order they arrive. One more gets `503 WriteQueueFull` instead of joining.
+the bulk deletes of projections, `POST /pause`, `POST /resume`, `POST /reset`, and the hourly `PRAGMA optimize`.
+They're served one at a time, in the order they arrive. One more gets `503 WriteQueueFull` instead of joining.
 
 - A write holds the turn only while its own SQLite transaction runs, usually a few milliseconds, so the queue is usually
   empty or short. Reads never wait in it.
@@ -2189,11 +2329,14 @@ curl http://127.0.0.1:8085/health
 ```
 
 - It checks that the process responds and that SQLite is reachable, with a trivial `SELECT 1` on the read pool.
-- On success: `200 OK`, with the version.
+- On success: `200 OK`, with whether a [pause](https://tamarackdb.github.io/docs/http-api/pause/) is in place, and the version.
 
   ```json
-  { "status": "ok", "version": "1.2.3" }
+  { "status": "ok", "paused": false, "version": "1.2.3" }
   ```
+
+- `paused` is always there. It's `true` only once a pause is in place, not while it's requested. A paused server still
+  answers `200`: it serves reads and writes of projections, so a load balancer keeps it in.
 
 - When SQLite can't be reached: `503 Unavailable`, the usual signal for "not ready right now", rather than the `500` of
   an ordinary failure.
@@ -2226,7 +2369,13 @@ curl http://127.0.0.1:8085/stats
     "committed": 18234,
     "abandoned": 40,
     "expired": 2,
-    "designErrors": 0
+    "designErrors": 0,
+    "paused": 0
+  },
+  "pause": {
+    "state": "normal",
+    "since": "2026-10-03T14:00:00.000000Z",
+    "openTransactions": 0
   },
   "errors": { "internal": 0 }
 }
@@ -2243,7 +2392,7 @@ curl http://127.0.0.1:8085/stats
 | Counter | What it counts |
 |---|---|
 | `writes.committed` | Writes committed: transaction commits that wrote something, and `POST /projections` calls |
-| `writes.conflicts.condition` | Transaction commits refused with `409` because a condition no longer held, or the store changed |
+| `writes.conflicts.condition` | Transaction commits refused with `409` because a condition no longer held |
 | `writes.conflicts.projection` | Writes refused with `409` because a projection wasn't at the version read: transaction commits and `POST /projections` calls |
 | `writes.writeQueueFull` | Requests turned away with `503 WriteQueueFull` |
 | `transactions.begun` | Transactions begun |
@@ -2251,6 +2400,10 @@ curl http://127.0.0.1:8085/stats
 | `transactions.abandoned` | Transactions ended with `DELETE /tx/{txId}` |
 | `transactions.expired` | Transactions ended after `txIdleTimeout` without a call |
 | `transactions.designErrors` | Transactions ended by a call that broke a rule, or by a malformed request. An event or a projection over its size limit doesn't count |
+| `transactions.paused` | `POST /tx` calls refused with `503 Paused` |
+| `pause.state` | Where the [pause](https://tamarackdb.github.io/docs/http-api/pause/) stands: `normal`, `pauseRequested`, or `paused` |
+| `pause.since` | When that state began |
+| `pause.openTransactions` | Transactions still open, and commits still writing: what a requested pause waits for |
 | `errors.internal` | Responses `500 InternalError` |
 
 ## Reading them
@@ -2265,6 +2418,8 @@ curl http://127.0.0.1:8085/stats
   on every path.
 - **`designErrors`** SHOULD stay at zero in production. A rising count means a client library sends calls in an order
   transactions never allow: it has a bug.
+- **`pauseRequested`** that lasts means a transaction is still open, or the coordinator stopped calling `POST /pause`:
+  `openTransactions` says how many are open. `POST /resume` withdraws it.
 - **`internal`** above zero is a failure on the server: the matching log lines are at level `error` (see
   [Logs](https://tamarackdb.github.io/docs/operations/logs/)).
 
@@ -2296,6 +2451,7 @@ Each outcome has a fixed level, not derived from the status code alone:
 | Outcome | Status | Level |
 |---|---|---|
 | Successful request | 2XX | `debug` |
+| `POST /pause` (`202` while requested, `200` once in place) or `POST /resume` done | 2XX | `info` |
 | Projection not found | 404 | `debug` |
 | Transaction not found | 404 | `info` |
 | Concurrency conflict | 409 | `debug` |
@@ -2303,6 +2459,8 @@ Each outcome has a fixed level, not derived from the status code alone:
 | Payload too large | 413 | `info` |
 | Missing or invalid bearer token | 401 | `info` |
 | Server shutting down | 503 | `info` |
+| Transaction refused during a pause (`Paused`) | 503 | `info` |
+| Reset outside a pause (`NotPaused`) | 409 | `info` |
 | Write queue full | 503 | `warning` |
 | Internal error | 500 | `error` |
 | Storage unreachable | 503 | `error` |
@@ -2443,6 +2601,8 @@ Two things to get right:
   `projections` table stays empty.
 - It's a regular TamarackDB database file. Unlike a raw copy of the source's file, which can miss commits still in the
   WAL, `tamarackdb-server` can serve it as a live instance.
+- No [pause](https://tamarackdb.github.io/docs/http-api/pause/): a run reads events only. A file served as a new instance starts without one, even
+  if the source was paused. Pause it again if an operation relied on the pause.
 - It has a store ID of its own, drawn when the run created it, not the source's. Served as an instance, it's seen as
   another store, which is right, since it can be behind the source.
 
@@ -2506,8 +2666,7 @@ WantedBy=timers.target
 Source: https://tamarackdb.github.io/docs/operations/maintenance/
 
 The server maintains itself: SQLite checkpoints its WAL, and the server refreshes query statistics every hour. Two
-operations are left to you, both run by hand while the server is
-stopped.
+operations are left to you, both run by hand while the server is stopped. A third, the pause, runs while it serves.
 
 Run both as the server's user (see [Install](https://tamarackdb.github.io/docs/operations/install/#run)).
 
@@ -2540,6 +2699,20 @@ sudo -u tamarackdb sqlite3 /path/to/data/tamarackdb.sqlite 'ANALYZE;'
 **Why the server is stopped.** Stopping it costs a few seconds, and keeps the server free of a long operation it would
 have to coordinate with reads in flight. A WAL file left behind by another user is also one the server can't open.
 
+## Pausing transactions
+
+A [pause](https://tamarackdb.github.io/docs/http-api/pause/) stops transactions from beginning, while reads and writes of projections go on. Use it
+for an operation that needs the log to stand still: a rebuild, a deploy.
+
+```sh
+curl -X POST http://127.0.0.1:8085/pause    # 202 while transactions are open: call again until 200
+curl -X POST http://127.0.0.1:8085/resume
+```
+
+- A pause survives a restart of the server. A forgotten one blocks every command, until `POST /resume`.
+- `GET /health` shows a pause in place, and `GET /stats` a requested one (see
+  [Observability](https://tamarackdb.github.io/docs/operations/observability/)).
+
 ---
 
 # Development mode
@@ -2551,7 +2724,7 @@ production.
 
 | What | Purpose |
 |---|---|
-| [`POST /reset`](https://tamarackdb.github.io/docs/http-api/reset/) | Deletes every event and projection, and draws a new store ID |
+| [`POST /reset`](https://tamarackdb.github.io/docs/http-api/reset/) | During a pause, deletes every event and projection, and draws a new store ID |
 | `/debug/pprof/*` | Go's standard profiling endpoints (CPU, heap, goroutine, and so on) |
 
 - With `devMode` off, neither exists: a request to either gets the plain `404` of any unknown path.

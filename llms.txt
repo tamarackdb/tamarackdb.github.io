@@ -29,7 +29,8 @@ The contract between TamarackDB and its clients: every endpoint of the HTTP API,
 - [Reading events](https://tamarackdb.github.io/docs/http-api/read-events/): QUERY /events: reading committed events a page at a time, the NDJSON response and its trailer, cursor pagination, and resuming a page that was cut short.
 - [Transactions](https://tamarackdb.github.io/docs/http-api/transactions/): The /tx endpoints: begin a transaction, read and write events, read and write projections, commit or abandon it, with each body, response, and error.
 - [Projections](https://tamarackdb.github.io/docs/http-api/projections/): Projections outside any transaction: writing them with POST /projections, reading one with its version, and deleting them in bulk for a rebuild.
-- [Reset](https://tamarackdb.github.io/docs/http-api/reset/): POST /reset, in development mode only: empties the store and draws a new store ID, for tests. What happens to the writes queued before and after it.
+- [Pause](https://tamarackdb.github.io/docs/http-api/pause/): POST /pause and POST /resume: stop transactions from beginning, for a fixed point in the log, a rebuild, or a deploy, and let them begin again.
+- [Reset](https://tamarackdb.github.io/docs/http-api/reset/): POST /reset, in development mode only and during a pause: empties the store and draws a new store ID, for tests, between pause and resume.
 - [Errors](https://tamarackdb.github.io/docs/http-api/errors/): The error envelope of the TamarackDB HTTP API, every error code with its status and meaning, and the causes of a 400 InvalidRequest response.
 - [Example: an online store](https://tamarackdb.github.io/docs/http-api/example/): One order in an online store as the HTTP calls an application sends: five decisions and their projections in one transaction, then an async projector.
 
@@ -50,5 +51,5 @@ Running a TamarackDB instance: installing it, configuring it, securing it, check
 - [Observability](https://tamarackdb.github.io/docs/operations/observability/): GET /stats: counters of writes, conflicts, transactions, and errors since the server started, and what each one tells about the instance and its clients.
 - [Logs](https://tamarackdb.github.io/docs/operations/logs/): The access log of tamarackdb-server: one line per request, what it carries and never carries, logLevel, and the fixed level of each outcome.
 - [Backup](https://tamarackdb.github.io/docs/operations/backup/): tamarackdb-backup keeps a standing copy of an instance's events: its settings, how a run works, local or remote sources, restoring, and scheduling.
-- [Maintenance](https://tamarackdb.github.io/docs/operations/maintenance/): The two maintenance tasks left to you, both run by hand while the server is stopped: giving back disk space with VACUUM, and a full ANALYZE.
+- [Maintenance](https://tamarackdb.github.io/docs/operations/maintenance/): The maintenance left to you: giving back disk space with VACUUM, a full ANALYZE, and pausing transactions for an operation that needs a still log.
 - [Development mode](https://tamarackdb.github.io/docs/operations/dev-mode/): What devMode turns on, POST /reset and Go's profiling endpoints, why it must stay off in production, and how to profile a request with pprof.
