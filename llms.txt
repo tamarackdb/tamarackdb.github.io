@@ -17,22 +17,21 @@ What TamarackDB is, and the ideas the rest of the documentation builds on: the m
 - [Transactions](https://tamarackdb.github.io/docs/concepts/transactions/): How a transaction works: it lives in the server's memory, pairs each read of events with a write, and writes it all at once, or nothing, at commit.
 - [Events](https://tamarackdb.github.io/docs/concepts/events/): What an event holds: type, identifiers and metadata as tags, an opaque payload, its Sequence Position, its time, and the limits on its size and tags.
 - [Store ID](https://tamarackdb.github.io/docs/concepts/store-id/): The store ID names the history a database file holds. Where it appears, when it changes, and why a position is always a store ID with a Sequence Position.
-- [Append Condition](https://tamarackdb.github.io/docs/concepts/append-condition/): How an Append Condition protects a decision: its shape, its edge cases, several conditions per write, what it doesn't cover, and TamarackDB's DCB compliance.
+- [Append Condition](https://tamarackdb.github.io/docs/concepts/append-condition/): How an Append Condition protects a decision: what a transaction builds from each read, its edge cases, what it doesn't cover, and DCB compliance.
 - [Projections](https://tamarackdb.github.io/docs/concepts/projections/): What a projection is, how versions keep two writes from overwriting each other, what a projection may use, and how to rebuild projections from events.
 
 ## HTTP API
 
 The contract between TamarackDB and its clients: every endpoint of the HTTP API, with its request, its response, and the errors it can return.
 
-- [Conventions](https://tamarackdb.github.io/docs/http-api/conventions/): What every endpoint of the TamarackDB HTTP API has in common: the endpoints, connecting, strict request bodies, the body size cap, and the store ID header.
+- [Conventions](https://tamarackdb.github.io/docs/http-api/conventions/): What every endpoint of the TamarackDB HTTP API has in common: connecting, strict request bodies, waiting for a turn, the client leaving, and the store ID.
 - [Query grammar](https://tamarackdb.github.io/docs/http-api/query-grammar/): The query grammar used to read events and in Append Conditions: "all", "none", query items, the matching rules, and the size limits.
 - [Reading events](https://tamarackdb.github.io/docs/http-api/read-events/): QUERY /events: reading committed events a page at a time, the NDJSON response and its trailer, cursor pagination, and resuming a page that was cut short.
 - [Transactions](https://tamarackdb.github.io/docs/http-api/transactions/): The /tx endpoints: begin a transaction, read and write events, read and write projections, commit or abandon it, with each body, response, and error.
-- [Writing](https://tamarackdb.github.io/docs/http-api/write/): POST /write: one write with events, Append Conditions, and projection changes, outside any transaction. Its limits, response, conflicts, and retries.
-- [Projections](https://tamarackdb.github.io/docs/http-api/projections/): Reading one projection with GET /projections/{type}/{id}, its version header, and deleting projections in bulk, by type or all at once, for a rebuild.
+- [Projections](https://tamarackdb.github.io/docs/http-api/projections/): Projections outside any transaction: writing them with POST /projections, reading one with its version, and deleting them in bulk for a rebuild.
 - [Reset](https://tamarackdb.github.io/docs/http-api/reset/): POST /reset, in development mode only: empties the store and draws a new store ID, for tests. What happens to the writes queued before and after it.
 - [Errors](https://tamarackdb.github.io/docs/http-api/errors/): The error envelope of the TamarackDB HTTP API, every error code with its status and meaning, and the causes of a 400 InvalidRequest response.
-- [Example: an online store](https://tamarackdb.github.io/docs/http-api/example/): One order in an online store as the HTTP calls an application sends: five decisions and their projections in one transaction, then a projector with POST /write.
+- [Example: an online store](https://tamarackdb.github.io/docs/http-api/example/): One order in an online store as the HTTP calls an application sends: five decisions and their projections in one transaction, then an async projector.
 
 ## Integration
 

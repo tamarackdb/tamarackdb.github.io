@@ -167,7 +167,7 @@ specification](https://dcb.events/specification/), is reachable over HTTP, and s
 - **Decision**: one read of events in a transaction, then the write of the events it produced, or none.
 - **Commit**: the end of a transaction, where everything it holds is checked, then written at once, or not at all.
 - **Write**: what the server writes at once, in one SQLite transaction: the commit of a transaction, or one
-  [`POST /write`](https://tamarackdb.github.io/docs/http-api/write/).
+  [`POST /projections`](https://tamarackdb.github.io/docs/http-api/projections/#writing-projections).
 
 ## Key words
 
@@ -336,8 +336,9 @@ What a projection may use is in [Projections](https://tamarackdb.github.io/docs/
   conditions: a condition only protects what is written.
 - The transaction is over after its commit, whatever the outcome. After a `409`, the application MUST run the whole
   command again, in a new transaction.
-- A commit whose response is lost can't be sent again: the transaction no longer exists. The application checks
-  whether its write happened, for example by reading a projection the transaction wrote.
+- A commit whose response is lost can't be sent again: the transaction no longer exists. The application runs the
+  command again: a decision whose read matches its own events then finds them, or gets `409`, and doesn't write them
+  twice (see [A lost response](https://tamarackdb.github.io/docs/http-api/transactions/#a-lost-response)).
 
 ## The end of a transaction
 
@@ -370,9 +371,10 @@ tell these cases apart.
 
 ## Outside a transaction
 
-[`POST /write`](https://tamarackdb.github.io/docs/http-api/write/) writes events and projections in one request, with no transaction. It serves
-what isn't a command: a projector that catches up on its own, a rebuild, a script. Its Append Conditions and projection
-versions are sent by the client (see [Append Condition](https://tamarackdb.github.io/docs/concepts/append-condition/)).
+Events enter the log only through a transaction. Projections also have a write of their own,
+[`POST /projections`](https://tamarackdb.github.io/docs/http-api/projections/#writing-projections), for what isn't a command: a projector that
+catches up on its own, or a rebuild. The client sends the version of each projection itself (see
+[Projections](https://tamarackdb.github.io/docs/concepts/projections/#versions)).
 
 ## The guarantee
 
@@ -447,9 +449,8 @@ tags, and the application knows how to read each one back.
 
 ## Time
 
-- `time` is when the server received the write that carries the event, read from the server's clock. In a
-  transaction, that's the write of the decision (see [Transactions](https://tamarackdb.github.io/docs/concepts/transactions/)). With
-  [`POST /write`](https://tamarackdb.github.io/docs/http-api/write/), that's when the write gets its turn, just before it commits.
+- `time` is when the server received the write that carries the event, read from the server's clock: the write of
+  the decision, in its transaction (see [Transactions](https://tamarackdb.github.io/docs/concepts/transactions/)).
 - It's in RFC 3339 format, always in UTC (`Z`), with exactly 6 fractional digits:
   `2026-09-01T14:23:05.123456Z`.
 - Every event of one write shares the same `time`. Order within a write comes from `sequence`.
@@ -497,7 +498,6 @@ Key words in capitals follow [RFC 2119](https://tamarackdb.github.io/docs/concep
 
 - In the `X-Tamarackdb-Store` header of every response that depends on the store (see
   [Conventions](https://tamarackdb.github.io/docs/http-api/conventions/#store-id-header)).
-- In an Append Condition, next to its `afterSequence` (see [Append Condition](https://tamarackdb.github.io/docs/concepts/append-condition/)).
 - Not in a transaction. The server keeps the store ID current at its begin, and the client never handles it. Once
   the store ID changes, the next call on the transaction gets `409`, and the transaction ends (see
   [Transactions](https://tamarackdb.github.io/docs/concepts/transactions/)).
@@ -525,62 +525,36 @@ Key words in capitals follow [RFC 2119](https://tamarackdb.github.io/docs/concep
 
 ## The flow
 
-TamarackDB runs the standard DCB flow, optimistically:
+TamarackDB runs the standard DCB flow, optimistically, in a [transaction](https://tamarackdb.github.io/docs/concepts/transactions/):
 
-1. Read the relevant events, and keep the Sequence Position read up to (`afterSequence`) and the store ID.
+1. Read the relevant events.
 2. Decide on the new events to append.
-3. Write them with a condition: fail if an event matching the query exists after `afterSequence`.
-4. If another write appended a matching event in between, the write gets `409 ConcurrencyException` and nothing is
-   written. Read again, decide again, and send a new write.
+3. Write them. The server checks at commit that no event matching the read was appended since.
+4. If another write appended a matching event in between, the commit gets `409 ConcurrencyException` and nothing is
+   written. Run the command again: read again, decide again.
 
-A read never locks anything. The decision is made on what was read, and the write carries what the decision depends on.
-
-- **In a transaction**, the server runs this flow itself: each read of events becomes a condition, with the query, the
-  position reached, and the store ID. The client never sees a condition (see
-  [Transactions](https://tamarackdb.github.io/docs/concepts/transactions/)).
-- **With [`POST /write`](https://tamarackdb.github.io/docs/http-api/write/)**, the client builds each condition and sends it, in the shape below.
-
-## Shape
-
-The shape `POST /write` takes:
-
-```json
-{
-  "failIfEventsMatch": [
-    { "identifiers": [ { "name": "userId", "value": "123" } ] }
-  ],
-  "afterSequence": 12345,
-  "store": "5b0c7e2a-1f4d-4a9b-8c3e-6d2f1a0b9e47"
-}
-```
-
-- `failIfEventsMatch`: a query, in the same [grammar](https://tamarackdb.github.io/docs/http-api/query-grammar/) as a read.
-- `afterSequence`: the Sequence Position the client read up to. It can be past the last matching event: it's what the
-  client saw, not necessarily a real event.
-- `store`: the store ID that read returned (see [Store ID](https://tamarackdb.github.io/docs/concepts/store-id/)).
+A read never locks anything. The decision is made on what was read, and the commit carries what the decision depends
+on. The client never builds or sends a condition: the server builds one from each read.
 
 ## Rules
 
-- The condition fails if any event matching `failIfEventsMatch` has a Sequence Position greater than `afterSequence`.
-- A condition with `afterSequence` MUST carry `store`. A condition without `afterSequence` MUST NOT carry it: it read
-  nothing, so it holds on any store. Breaking either rule gets `400`.
-- A condition whose `store` isn't the current store ID fails with `409`: its `afterSequence` names a position in another
-  history. The server decides this without any SQL.
-- Both `failIfEventsMatch` and `afterSequence` are optional:
-  - `failIfEventsMatch` alone fails if any matching event exists at all, from Sequence Position 1. It suits a decision
-    that rests on no read, for example "fail if a `user-registered` event with this email exists".
-  - `afterSequence` alone fails if any event at all exists after it.
-  - A condition with neither field always holds: it says nothing, so it protects nothing.
-  - A condition on `"none"` always holds, with or without `afterSequence`: no event can match it.
-- A write carries a list of conditions, at most `maxEventsPerWrite` of them, and every one MUST hold. The first one that
-  fails ends the write, and the `409` names it by its place: `conditions[1] no longer holds`, or `conditions[0] was read
-  on another store`.
-- The server checks conditions against committed events only, in the same SQLite transaction as the inserts. Nothing can
-  slip in between the checks and the inserts: writes are served one at a time, in the order they arrive.
+- Each read of events in a transaction becomes a condition: its query, the Sequence Position the read reached, and
+  the store ID.
+- The condition fails if any committed event matching the query has a Sequence Position greater than the one the read
+  reached. The read reaches the last event in the store, matching or not.
+- A read that finds nothing still protects its decision. A command that checks "no `user-registered` event with this
+  email" reads with that query, finds nothing, and its commit fails if a matching event is appended after the read.
+- A condition on `"none"` always holds: no event can match it.
+- A commit carries one condition per read, and every one MUST hold. The first one that fails ends the commit, and the
+  `409` names it by the rank of its read: `conditions[1] no longer holds` for the second read.
+- The server checks conditions against committed events only, in the same SQLite transaction as the inserts. Nothing
+  can slip in between the checks and the inserts: writes are served one at a time, in the order they arrive.
+- A Sequence Position only means something next to its store ID. A transaction begun before a reset gets `409` (see
+  [Store ID](https://tamarackdb.github.io/docs/concepts/store-id/)).
 
-**Why a list.** A write usually has one condition per decision: each decision adds the condition its own read
-supports. A transaction's commit carries one condition per read. Merging them into one condition with OR would refuse a write whenever any of the queries matched anything
-after the earliest position. A list is more precise, and still never a partial success.
+**Why a list.** Each read supports its own decision. Merging the conditions into one, with OR, would refuse a commit
+whenever any of the queries matched anything after the earliest position. A list is more precise, and still never a
+partial success.
 
 ## What a condition doesn't cover
 
@@ -598,8 +572,8 @@ TamarackDB follows the [DCB specification](https://dcb.events/specification/):
 |---|---|---|
 | Read events filtered by type and/or tags through a Query | MUST | [`QUERY /events`](https://tamarackdb.github.io/docs/http-api/read-events/) |
 | Read from a given Sequence Position | SHOULD | `afterSequence` on `QUERY /events` |
-| Append one or more events atomically | MUST | Every commit, and every [`POST /write`](https://tamarackdb.github.io/docs/http-api/write/), writes atomically |
-| Fail the append if an event matches the Append Condition, when one is given | MUST | Every read in a transaction, and `conditions` on `POST /write` |
+| Append one or more events atomically | MUST | Every [commit](https://tamarackdb.github.io/docs/http-api/transactions/#commit) writes atomically |
+| Fail the append if an event matches the Append Condition, when one is given | MUST | Every read in a transaction |
 
 Its guarantee is exactly the one of the specification, no more and no less. Only what an Append Condition or a
 projection version expresses is protected. A broader guarantee is a business rule of the application, not something the
@@ -624,9 +598,9 @@ Key words in capitals follow [RFC 2119](https://tamarackdb.github.io/docs/concep
 - It's always read by `type` and `id`. There is no query over projections.
 - Every projection can be rebuilt from events. That's why backups leave projections out (see
   [Backup](https://tamarackdb.github.io/docs/operations/backup/)).
-- Projections live in the same SQLite file as events, and are written by the same writes: a transaction's commit, or
-  [`POST /write`](https://tamarackdb.github.io/docs/http-api/write/). Events and projections of one write become durable together, or neither
-  does.
+- Projections live in the same SQLite file as events. A transaction's commit writes both: its events and projections
+  become durable together, or neither does. Outside a transaction,
+  [`POST /projections`](https://tamarackdb.github.io/docs/http-api/projections/#writing-projections) writes projections only.
 - The payload's format (JSON, XML, plain text) is up to the writing application. The store never parses it.
 
 The calls are in [HTTP API: Projections](https://tamarackdb.github.io/docs/http-api/projections/), and in
@@ -639,18 +613,19 @@ Every projection has a version, a random UUID (version 4), new on every write.
 - In a transaction, the server keeps the version of each projection read, and the client never sees it (see
   [Transactions](https://tamarackdb.github.io/docs/concepts/transactions/#projections-in-a-transaction)). At commit, the server checks it the same
   way as below.
-- With [`POST /write`](https://tamarackdb.github.io/docs/http-api/write/), a write changes a projection with one of three operations:
+- With [`POST /projections`](https://tamarackdb.github.io/docs/http-api/projections/#writing-projections), a write changes a projection with one
+  of three operations:
   - `create`: the `type` + `id` MUST be free.
   - `replace`: the stored version MUST be the one given. The whole payload is replaced.
   - `delete`: the stored version MUST be the one given.
-- An operation that doesn't hold fails the whole write with `409 ConcurrencyException`, events included. A `replace`
-  or `delete` of a projection that no longer exists fails the same way: another write deleted it since it was read.
+- An operation that doesn't hold fails the whole write with `409 ConcurrencyException`. A `replace` or `delete` of a
+  projection that no longer exists fails the same way: another write deleted it since it was read.
 - A `409` on a projection means another write changed it since it was read. Read it again and redo the work, in a new
   transaction or a new write.
 - Only the projections a write changes are checked, never the ones it only read (see
   [Append Condition](https://tamarackdb.github.io/docs/concepts/append-condition/#what-a-condition-doesnt-cover)).
 - A client MUST treat a version it receives as opaque: compare it only for equality, and never compute it. To change
-  the same projection again with `POST /write`, use the version from the last response.
+  the same projection again with `POST /projections`, use the version from the last response.
 
 **Why.** The version check is what keeps two writes from overwriting each other's projections: each one read a
 version, and the second write to arrive finds it changed. An opaque UUID can't be guessed from the previous one, and
@@ -678,8 +653,9 @@ replaying every event in order, several threads in parallel, or anything else. I
 1. Delete the projections to rebuild, one type at a time or all at once, with a
    [bulk delete](https://tamarackdb.github.io/docs/http-api/projections/#bulk-delete).
 2. Page through [`QUERY /events`](https://tamarackdb.github.io/docs/http-api/read-events/) to read the events to replay.
-3. Write the rebuilt projections with [`POST /write`](https://tamarackdb.github.io/docs/http-api/write/), in one write or several. A projection
-   is a `create` the first time, then a `replace` with the version the previous write returned.
+3. Write the rebuilt projections with [`POST /projections`](https://tamarackdb.github.io/docs/http-api/projections/#writing-projections), in one
+   write or several. A projection is a `create` the first time, then a `replace` with the version the previous write
+   returned.
 
 One write or several is the application's choice:
 
@@ -720,14 +696,14 @@ Key words in capitals follow [RFC 2119](https://tamarackdb.github.io/docs/concep
 |---|---|
 | [`QUERY /events`](https://tamarackdb.github.io/docs/http-api/read-events/) | Read committed events |
 | [`POST /tx`](https://tamarackdb.github.io/docs/http-api/transactions/) and `/tx/{txId}/...` | Begin a transaction, read and write in it, then commit it in its turn, or abandon it |
-| [`POST /write`](https://tamarackdb.github.io/docs/http-api/write/) | Check Append Conditions, append events, and write projections, all or nothing, in its turn |
-| [`GET /projections/{type}/{id}`](https://tamarackdb.github.io/docs/http-api/projections/) | Read one committed projection |
+| [`POST /projections`](https://tamarackdb.github.io/docs/http-api/projections/#writing-projections) | Create, replace, and delete projections outside any transaction, all or nothing, in its turn |
+| [`GET /projections/{type}/{id}`](https://tamarackdb.github.io/docs/http-api/projections/#reading-a-projection) | Read one committed projection |
 | [`DELETE /projections/{type}`](https://tamarackdb.github.io/docs/http-api/projections/#bulk-delete) | Delete every projection of one type, in its turn |
 | [`DELETE /projections`](https://tamarackdb.github.io/docs/http-api/projections/#bulk-delete) | Delete every projection, in its turn |
 | [`POST /reset`](https://tamarackdb.github.io/docs/http-api/reset/) | Delete all events and projections and draw a new store ID, in its turn (development mode only) |
 
 - "In its turn" means the request waits behind the requests that arrived before it: the server runs them one at a
-  time, in the order they arrive.
+  time, in the order they arrive (see [Waiting for a turn](#waiting-for-a-turn)).
 - `GET /health` and `GET /stats` are operational endpoints (see [Health check](https://tamarackdb.github.io/docs/operations/health-check/) and
   [Observability](https://tamarackdb.github.io/docs/operations/observability/)).
 
@@ -751,13 +727,40 @@ The examples in these pages assume a server on `127.0.0.1:8085`, with authentica
   - anything after the JSON value, other than whitespace, gets `400`.
 - Every request body is capped at `maxRequestBodySize` (see [Configuration](https://tamarackdb.github.io/docs/operations/configuration/)). Past
   the cap, the server stops reading and responds `413 PayloadTooLarge`.
+- A request that waits for its turn is read and checked in full before it joins the queue. An invalid body gets `400`
+  or `413` right away.
 
 **Why strict.** Most keys are optional. A misspelled one would otherwise be dropped without a word: a misspelled
 `afterSequence` would widen a read, and a misspelled list in a write would drop it.
 
 **Why a body cap.** It keeps a client from making the server read an unbounded body into memory before the other
 limits are checked. It isn't checked against the other limits: a body can reach it before every one of its items
-reaches its own. It's the real bound on a write, and the others are rules for each item.
+reaches its own. It bounds one request, not a transaction, which is built over many requests: a transaction has
+limits of its own (see [Transactions](https://tamarackdb.github.io/docs/http-api/transactions/#limits)).
+
+**Why check the body before the turn.** A client sending its body slowly would otherwise hold the turn, and every
+request behind it, for as long as it likes.
+
+## Waiting for a turn
+
+These requests wait for their turn: a transaction's commit, `POST /projections`, the bulk deletes of projections, and
+`POST /reset`.
+
+- They go through one at a time, in the order they arrive. Each waits, with its connection held open, behind the
+  requests that arrived before it.
+- Each holds the turn only for its own SQLite transaction, usually a few milliseconds.
+- When too many requests already wait (`maxQueuedWrites`, see [Configuration](https://tamarackdb.github.io/docs/operations/configuration/)), a
+  new one gets `503 WriteQueueFull` and never joins the queue. Nothing is written.
+- A request waiting or arriving while the server shuts down gets `503 ShuttingDown`. Nothing is written.
+- The server puts no limit on how long a request waits. A client sets its own: when it no longer wants to wait, it
+  closes the connection.
+
+## The client leaving
+
+- A client that disconnects while its request waits leaves the queue, and nothing is written.
+- The server checks once more that the client is still there just as the turn comes.
+- From then on, the request goes to the end, even if the client leaves. The client then can't tell whether it was
+  written.
 
 ## Store ID header
 
@@ -768,7 +771,7 @@ that depends on the store:
 |---|---|
 | `QUERY /events` | On every page, empty pages included |
 | `GET /projections/{type}/{id}` | On `200` and on `404` |
-| `POST /write` | On `200` |
+| `POST /projections` | On `200` |
 
 - No transaction endpoint carries it: the server keeps the store ID with the transaction.
 - A read takes the store ID in the same SQLite snapshot as the events or the projection it returns, so a response
@@ -786,8 +789,8 @@ Every error from an endpoint uses one JSON envelope, with a stable code (see [Er
 
 Source: https://tamarackdb.github.io/docs/http-api/query-grammar/
 
-A query selects events by type and tags. The same grammar serves `query` in a read and `failIfEventsMatch` in an Append
-Condition. It follows the DCB specification.
+A query selects events by type and tags, in `QUERY /events` and in a transaction's read. It follows the DCB
+specification.
 
 Key words in capitals follow [RFC 2119](https://tamarackdb.github.io/docs/concepts/overview/#key-words).
 
@@ -988,6 +991,7 @@ curl -X QUERY http://127.0.0.1:8085/tx/7d1e4b2a-3c5f-4e6d-9a8b-0c1d2e3f4a5b/even
 - `query` is required, in the [query grammar](https://tamarackdb.github.io/docs/http-api/query-grammar/). A decision that rests on no event reads
   `"none"`. The body takes no other key: there is no `afterSequence` and no `limit`.
 - The read opens a condition. The next call on the transaction MUST be [a write of events](#writing-events).
+- A read past `maxReadsPerTx` gets `400` (see [Limits](#limits)).
 
 `200 OK`, with an [NDJSON](https://github.com/ndjson/ndjson-spec) body (`Content-Type: application/x-ndjson`):
 
@@ -1020,12 +1024,14 @@ curl -X POST http://127.0.0.1:8085/tx/7d1e4b2a-3c5f-4e6d-9a8b-0c1d2e3f4a5b/event
 {"time":"2026-10-03T21:11:07.554310Z"}
 ```
 
-- `events` is required. Each event has the same shape as in [`POST /write`](https://tamarackdb.github.io/docs/http-api/write/#request).
+- `events` is required. Each event has a `type`, `identifiers`, `metadata`, and a `payload` (see
+  [Events](https://tamarackdb.github.io/docs/concepts/events/#fields)).
 - `{"events": []}` is the decision to write nothing. It closes the condition like any other write.
 - The write closes the open condition. Without one, it's refused.
 - `time` is the time every event of this write carries, read from the server's clock when the write arrived. The
   events get their `sequence` at commit.
 - An event over `maxEventSize` gets `413`.
+- A write that would take the transaction over `maxEventsPerTx` events gets `400` (see [Limits](#limits)).
 
 ## Reading a projection
 
@@ -1065,6 +1071,7 @@ curl -X POST http://127.0.0.1:8085/tx/7d1e4b2a-3c5f-4e6d-9a8b-0c1d2e3f4a5b/proje
 - One write names a projection at most once, across the two lists.
 - Deleting a projection that doesn't exist does nothing.
 - A projection over `maxProjectionSize` gets `413`.
+- A write that would take the transaction over `maxProjectionsPerTx` projections gets `400` (see [Limits](#limits)).
 - A write is refused while a condition is open.
 - `time` is the time of the write, by the server's clock: the response has the same shape as a write of events.
 
@@ -1078,12 +1085,12 @@ curl -X POST http://127.0.0.1:8085/tx/7d1e4b2a-3c5f-4e6d-9a8b-0c1d2e3f4a5b/commi
 from its write, and nothing else is returned.
 
 - A commit is refused while a condition is open.
-- It waits for its turn behind the writes that arrived before it, and may get `503 WriteQueueFull` or
-  `503 ShuttingDown`, like [`POST /write`](https://tamarackdb.github.io/docs/http-api/write/#waiting-for-a-turn).
+- It waits for its turn behind the requests that arrived before it, and may get `503 WriteQueueFull` or
+  `503 ShuttingDown` (see [Waiting for a turn](https://tamarackdb.github.io/docs/http-api/conventions/#waiting-for-a-turn)).
 - A transaction with nothing to write gets `204` at once.
 - The transaction is over after its commit, whatever the outcome. A client that disconnects while its commit waits
   leaves the queue, and nothing is written. Once its turn comes, the commit goes to the end, even if the client
-  leaves (see [The client leaving](https://tamarackdb.github.io/docs/http-api/write/#the-client-leaving)).
+  leaves (see [The client leaving](https://tamarackdb.github.io/docs/http-api/conventions/#the-client-leaving)).
 
 A conflict gets `409 ConcurrencyException`, and nothing is written. The `message` names the cause:
 
@@ -1096,18 +1103,26 @@ A conflict gets `409 ConcurrencyException`, and nothing is written. The `message
 
 After a `409`, the client runs the whole command again, in a new transaction.
 
-### Limits
-
-At commit, the transaction as a whole MUST fit the limits of one write: at most `maxEventsPerWrite` events, at most
-`maxEventsPerWrite` reads of events, and at most `maxProjectionsPerWrite` projections to write (see
-[Configuration](https://tamarackdb.github.io/docs/operations/configuration/#settings)). Over a limit, the commit gets `400`, and the `message` names
-the setting.
-
 ### A lost response
 
-If the commit's response is lost, the client can't send it again: the transaction no longer exists, and a second
-commit gets `404 TransactionNotFound`. To know whether the write happened, the client reads what the transaction wrote,
-a projection for example.
+If the commit's response is lost, the client can't tell whether the write happened. It can't send the commit again:
+the transaction no longer exists, and a second commit gets `404 TransactionNotFound`.
+
+The application runs the whole command again, in a new transaction:
+
+- If the first commit didn't go through, the new one writes normally.
+- If it did, or is still waiting or running, the new commit comes after it: commits are served in the order they
+  arrive. The new transaction's read either finds the first commit's events, or its condition fails with `409` and
+  the command runs once more. Either way, the decision ends up made on those events, and doesn't write them twice.
+
+This holds for the events of a decision whose read matches them: run again, the decision finds them and writes
+nothing, so the code that reacts to them doesn't run either. An event written by a decision that reads `"none"`, or
+whose query doesn't match it, and not in reaction to such a decision, would be written a second time. Such a command
+MUST find out by other means. The usual way is to give the entity an ID before the first call, and have the decision
+that creates it read that ID (see the [example](https://tamarackdb.github.io/docs/http-api/example/#when-something-changes-in-between)).
+
+**Why not read back what the commit wrote.** Finding nothing can mean "not written" or "not written yet": the first
+commit may still be waiting or running, and a read never waits for it.
 
 ## Abandon
 
@@ -1118,11 +1133,34 @@ curl -X DELETE http://127.0.0.1:8085/tx/7d1e4b2a-3c5f-4e6d-9a8b-0c1d2e3f4a5b
 `204 No Content`, always, even for a transaction that already ended. Nothing it held is written. It's meant as a
 precaution in the error handler around a command, often after an error already ended the transaction.
 
+## Limits
+
+Three settings bound a transaction, across all its calls (see
+[Configuration](https://tamarackdb.github.io/docs/operations/configuration/#settings)):
+
+| Setting | What it counts |
+|---|---|
+| `maxEventsPerTx` | The events the transaction writes, across all its writes of events |
+| `maxReadsPerTx` | Its reads of events, those followed by an empty write included |
+| `maxProjectionsPerTx` | The distinct projections it writes, across all its writes of projections, `upsert` and `delete` together. A projection written twice counts once |
+
+- Each call is checked before it does anything. The call that would go over gets `400 InvalidRequest`, and the
+  `message` names the setting, for example `the transaction would read events 101 times, more than maxReadsPerTx
+  (100)`.
+- Like any error, the refusal ends the transaction.
+- The read of events that would go over runs no query.
+
+**Why.** `maxRequestBodySize` bounds one request, not a transaction, which is built over many requests. A commit holds
+its turn while it checks the condition of every read and writes every event and projection: without these limits,
+every request behind it would wait for as long as the transaction likes. Every read counts, on `"none"` or followed by
+an empty write included, so the rule needs no exceptions. Checking each call tells the client before it has done all
+its work.
+
 ## Errors
 
 | Status | `error` | When |
 |---|---|---|
-| `400` | `InvalidRequest` | A malformed body, or a call that breaks a rule of transactions. The `message` names the rule, for example `events written without a read` |
+| `400` | `InvalidRequest` | A malformed body, a call that breaks a rule of transactions, or a call over a [limit](#limits). The `message` names the rule or the setting, for example `events written without a read` |
 | `404` | `TransactionNotFound` | The transaction is unknown, expired, or already over |
 | `404` | `ProjectionNotFound` | [Reading a projection](#reading-a-projection) that doesn't exist |
 | `409` | `ConcurrencyException` | At commit, a [conflict](#commit). On any call, a store reset since the transaction began |
@@ -1133,198 +1171,105 @@ Every error but `404 ProjectionNotFound` ends the transaction. The full list of 
 
 ---
 
-# Writing
+# Projections
 
-Source: https://tamarackdb.github.io/docs/http-api/write/
+Source: https://tamarackdb.github.io/docs/http-api/projections/
 
-`POST /write` sends one write: the events to append, the Append Conditions they depend on, and the projection
-changes. It's checked and applied all or nothing, in its turn.
-
-It serves what isn't a command, outside any transaction: a projector that catches up on its own, a rebuild, a script.
-The client sends its conditions and the versions of its projections itself. A command uses a
-[transaction](https://tamarackdb.github.io/docs/http-api/transactions/), where the server keeps both.
+Writing, reading, and deleting projections outside any transaction. A command writes its projections in a
+[transaction](https://tamarackdb.github.io/docs/http-api/transactions/#writing-projections) instead. What a projection is, and how versions work,
+is in [Concepts: Projections](https://tamarackdb.github.io/docs/concepts/projections/).
 
 Key words in capitals follow [RFC 2119](https://tamarackdb.github.io/docs/concepts/overview/#key-words).
 
-## Request
+## Writing projections
+
+`POST /projections` creates, replaces, and deletes projections, all or nothing, in its turn. It serves an
+asynchronous projector and a [rebuild](https://tamarackdb.github.io/docs/concepts/projections/#rebuilds): the client sends the version it read of
+each projection itself.
 
 ```sh
-curl -X POST http://127.0.0.1:8085/write \
+curl -X POST http://127.0.0.1:8085/projections \
   -H "Content-Type: application/json" \
   -d '{
-    "events": [
-      {
-        "type": "user-renamed",
-        "identifiers": { "userId": "123" },
-        "metadata": { "tenantId": "acme" },
-        "payload": "{\"name\":\"Ada Lovelace\"}"
-      }
-    ],
-    "conditions": [
-      {
-        "failIfEventsMatch": [ { "identifiers": [ { "name": "userId", "value": "123" } ] } ],
-        "afterSequence": 12345,
-        "store": "5b0c7e2a-1f4d-4a9b-8c3e-6d2f1a0b9e47"
-      }
-    ],
-    "projections": {
-      "create":  [ { "type": "user-list-entry", "id": "789", "payload": "..." } ],
-      "replace": [ { "type": "user-profile", "id": "123", "version": "9f3c2a1e-7b4d-4c8e-a5f6-0d1e2f3a4b5c", "payload": "..." } ],
-      "delete":  [ { "type": "user-list-entry", "id": "456", "version": "1b2c3d4e-5f60-4718-9a0b-c1d2e3f4a5b6" } ]
-    }
+    "create":  [ { "type": "daily-sales", "id": "2026-10-03", "payload": "{\"total\":4230}" } ],
+    "replace": [ { "type": "projector-position", "id": "daily-sales", "version": "1b2c3d4e-5f60-4718-9a0b-c1d2e3f4a5b6", "payload": "17" } ],
+    "delete":  [ { "type": "daily-sales", "id": "2026-10-02", "version": "9f3c2a1e-7b4d-4c8e-a5f6-0d1e2f3a4b5c" } ]
   }'
 ```
 
 | Key | What it holds |
 |---|---|
-| `events` | Events to append: `type`, `identifiers`, `metadata`, `payload` (see [Events](https://tamarackdb.github.io/docs/concepts/events/)) |
-| `conditions` | Append Conditions (see [Append Condition](https://tamarackdb.github.io/docs/concepts/append-condition/)) |
-| `projections.create` | `type`, `id`, `payload` |
-| `projections.replace` | `type`, `id`, `version`, `payload` |
-| `projections.delete` | `type`, `id`, `version` |
+| `create` | `type`, `id`, `payload`: a projection that MUST NOT exist yet |
+| `replace` | `type`, `id`, `version`, `payload`: a projection that MUST still be at `version` |
+| `delete` | `type`, `id`, `version`: a projection that MUST still be at `version` |
 
-- Every key is optional, and a missing one is an empty list. The body is decoded strictly (see
-  [Conventions](https://tamarackdb.github.io/docs/http-api/conventions/#request-bodies)).
-- A projection `payload` is a string, and an empty string is valid. A missing or `null` payload gets `400`, so a key
-  dropped on the client (JavaScript's `JSON.stringify` drops `undefined` values) never writes an empty payload.
+- Every key is optional, and a missing one is an empty list.
+- A `payload` is a string, and an empty string is valid. A missing or `null` payload gets `400`, so a key dropped on
+  the client (JavaScript's `JSON.stringify` drops `undefined` values) never writes an empty payload.
 - The same `type` + `id` MUST NOT appear twice in one write, across the three lists. So the order in which the lists
   are applied doesn't matter.
+- A write with nothing in it responds `200` right away, without waiting for a turn.
+- The write waits for its turn (see [Waiting for a turn](https://tamarackdb.github.io/docs/http-api/conventions/#waiting-for-a-turn) and
+  [The client leaving](https://tamarackdb.github.io/docs/http-api/conventions/#the-client-leaving)). In its turn, every projection is written,
+  each one conditional on its version, in one SQLite transaction, or nothing is.
 
-**Why three lists.** One list with an operation flag would leave combinations of keys to forbid. Three lists with a
-fixed shape each leave none.
+**Why three lists with versions.** In a transaction, the server knows the version read, since the read goes through
+it. Outside one, only the client knows it: it sends it, and a `create` has none. One list with an operation flag
+would leave combinations of keys to forbid; three lists with a fixed shape each leave none.
 
-## Limits
+### Limits
 
 Each limit is a setting, with its default in [Configuration](https://tamarackdb.github.io/docs/operations/configuration/#settings).
 
 | Limit | Over it |
 |---|---|
-| `maxEventsPerWrite` events | `400` |
-| `maxEventsPerWrite` conditions | `400` |
 | `maxProjectionsPerWrite` projections, across the three lists | `400` |
-| `maxEventSize` bytes per event (see [Events](https://tamarackdb.github.io/docs/concepts/events/#size)) | `413` |
 | `maxProjectionSize` bytes per projection: its `type`, `id`, and `payload` together | `413` |
 | `maxRequestBodySize` bytes for the whole body | `413` |
 
 - Each error from a limit names its setting, for example `request carries 612 projections, more than
   maxProjectionsPerWrite (500)`, so a developer who hits one in development knows which setting to raise.
-- The defaults are a cautious starting point: find the real limits in development, with the application's data, and
-  set them for production (see [Configuration](https://tamarackdb.github.io/docs/operations/configuration/)).
+- A rebuild larger than `maxProjectionsPerWrite` writes in several calls.
 
-## What the server does
-
-1. It reads and checks the whole body, before the write waits for its turn. An invalid body gets `400` or `413` right
-   away.
-2. It waits for its turn in the write FIFO (see [Waiting for a turn](#waiting-for-a-turn)).
-3. In its turn, it runs one SQLite transaction:
-   1. Every Append Condition is checked, in order, against the events committed before this write. The first that
-      doesn't hold ends the write.
-   2. The projections are written, each one conditional on its version. The first that doesn't hold ends the write.
-   3. The events get their Sequence Positions and their `time`, and are inserted.
-   4. The transaction commits.
-
-- Events and projections become durable together, or nothing is written.
-- Conditions are checked even when the write carries nothing else.
-- A write with nothing at all (no event, no condition, no projection) responds `200` right away, without waiting for a
-  turn.
-
-**Why check the body first.** A client sending its body slowly would otherwise hold the turn, and every write behind
-it, for as long as it likes.
-
-## Response
+### Response
 
 `200 OK`, with the store ID in the `X-Tamarackdb-Store` header:
 
 ```json
 {
-  "events": [
-    { "sequence": 12348, "time": "2026-09-01T14:25:00.000000Z" }
-  ],
-  "projections": {
-    "create": [ { "version": "5a6b7c8d-9e0f-4a1b-8c2d-3e4f5a6b7c8d" } ],
-    "replace": [ { "version": "d4c3b2a1-0f9e-4d8c-b7a6-5f4e3d2c1b0a" } ]
-  }
+  "create":  [ { "version": "5a6b7c8d-9e0f-4a1b-8c2d-3e4f5a6b7c8d" } ],
+  "replace": [ { "version": "d4c3b2a1-0f9e-4d8c-b7a6-5f4e3d2c1b0a" } ]
 }
 ```
 
-- `events`: the Sequence Position and `time` of each event, in the order they were sent (see
-  [Events](https://tamarackdb.github.io/docs/concepts/events/#time)).
-- `projections`: the new version of each created and replaced projection, in the order they were sent.
-- Every list is always present, empty if need be.
+- The new version of each created and replaced projection, in the order they were sent.
+- Both lists are always present, empty if need be.
 
-## Conflicts
+### Conflicts
 
-A condition that doesn't hold, or a projection that isn't at the version given, gets `409 ConcurrencyException`.
-Nothing is written. The `message` names the item by its place in the body:
+A projection that isn't where the write expects it gets `409 ConcurrencyException`, and nothing is written. The
+`message` names the projection by its place in the body:
 
 | Cause | `message` |
 |---|---|
-| An event matching a condition exists after its `afterSequence`, or at all for a condition without one | `conditions[1] no longer holds` |
-| A condition was read on another store ID | `conditions[0] was read on another store` |
-| A `replace` or `delete` whose version isn't the stored one, or whose projection no longer exists | `projections.replace[0] no longer has the given version` |
-| A `create` whose `type` + `id` already exists | `projections.create[0] already exists` |
+| A `create` whose `type` + `id` already exists | `create[0] already exists` |
+| A `replace` or `delete` whose version isn't the stored one, or whose projection no longer exists | `replace[0] no longer has the given version` |
 
-What to do next is in [Append Condition](https://tamarackdb.github.io/docs/concepts/append-condition/#the-flow) and
-[Projections](https://tamarackdb.github.io/docs/concepts/projections/#versions).
+After a `409`, the client reads the projection again, and decides again from what it finds (see
+[Versions](https://tamarackdb.github.io/docs/concepts/projections/#versions)).
 
-## Waiting for a turn
+**Why a `delete` of a missing projection gets `409`.** The client sent a version, and a missing projection has none:
+the condition doesn't hold, as for a `replace`. The client learns that another write removed the projection since its
+read, a bulk delete for example.
 
-- Writes go through one at a time, in the order they arrive. A write waits for its turn, with its connection held
-  open, behind the requests that arrived before it.
-- Each holds the turn only for its own SQLite transaction, usually a few milliseconds.
-- When too many requests already wait, a new one gets `503 WriteQueueFull` and never joins the queue. Nothing is
-  written.
-- The server puts no limit on how long a write waits. A client sets its own: when it no longer wants to wait, it
-  closes the connection.
+### A lost response
 
-## The client leaving
+If the response is lost, the client can send the same write again. If the first attempt went through, the retry
+always gets `409`: each `create` already exists, and each `replace` or `delete` finds another version, or no
+projection. A write of projections is never applied twice.
 
-- A client that disconnects while its write waits leaves the queue, and nothing is written.
-- The server checks once more that the client is still there just as the turn comes.
-- From then on, the write goes to the end, conditions and all, even if the client leaves. The client then can't tell
-  whether the write happened.
-
-## A lost response
-
-If the connection drops before the response arrives, the client can't tell whether the write happened. Reading the
-events again doesn't settle it either: finding nothing can mean "not written" or "not written yet".
-
-To retry, a client sends the same write again, with the same Append Conditions, `afterSequence` included. Writes are
-served in the order they arrive, so the retry comes after the first attempt.
-
-- If the first attempt didn't go through, the retry is written normally.
-- If it did, the retry fails with `409` instead of writing the same events twice, but only if the first attempt left
-  something the retry checks:
-  - an event that matches one of its conditions (a condition only sees the events that match its
-    `failIfEventsMatch`);
-  - or a projection change, whose version no longer matches.
-- A write with no condition and no projection change, or whose events match none of its conditions, would be written
-  twice.
-
-To make any write safe to retry, give it a unique `writeId` in the metadata of each of its events, the same for every
-attempt, and add a condition on it with no `afterSequence`:
-
-```json
-{
-  "failIfEventsMatch": [
-    { "metadata": [ { "name": "writeId", "value": "0f8e2d4c-9a1b-4c3d-8e7f-6a5b4c3d2e1f" } ] }
-  ]
-}
-```
-
-The name is up to the client: TamarackDB gives it no meaning. A `409` on the retry is settled by reading the events
-with that `writeId`. If they're there, the first attempt went through. If not, another write broke one of the
-conditions, and since the first attempt carries the same ones, it can't go through either.
-
----
-
-# Projections
-
-Source: https://tamarackdb.github.io/docs/http-api/projections/
-
-Reading one projection, and deleting projections in bulk, outside any transaction. Projections are written in a
-[transaction](https://tamarackdb.github.io/docs/http-api/transactions/#writing-projections), or with [`POST /write`](https://tamarackdb.github.io/docs/http-api/write/). What a projection is, and how versions work, is in
-[Concepts: Projections](https://tamarackdb.github.io/docs/concepts/projections/).
+A `409` on a retry doesn't say whether the first attempt went through, or another write came first. Either way, the
+client reads the projections again and decides from what it finds.
 
 ## Reading a projection
 
@@ -1362,7 +1307,7 @@ curl -X DELETE http://127.0.0.1:8085/projections
   Both respond `204 No Content`.
 - Neither takes a version: they're meant for a [rebuild](https://tamarackdb.github.io/docs/concepts/projections/#rebuilds), and never report a
   conflict.
-- Both wait for their turn like a write (see [Writing](https://tamarackdb.github.io/docs/http-api/write/#waiting-for-a-turn)):
+- Both wait for their turn (see [Waiting for a turn](https://tamarackdb.github.io/docs/http-api/conventions/#waiting-for-a-turn)):
   - a write queued before the delete goes through first, and the delete then removes what it wrote;
   - a later write that replaces or deletes a projection the delete removed gets `409`;
   - a delete can get `503 WriteQueueFull`;
@@ -1394,13 +1339,13 @@ tests left behind.
 
 ## Its turn
 
-A reset waits for its turn like a write (see [Writing](https://tamarackdb.github.io/docs/http-api/write/#waiting-for-a-turn)):
+A reset waits for its turn like a write (see [Waiting for a turn](https://tamarackdb.github.io/docs/http-api/conventions/#waiting-for-a-turn)):
 
 - The writes queued before it go through, then the reset deletes them.
 - A write queued after it runs on the new store:
-  - a condition that carries the old store ID gets `409`;
-  - a `replace` or `delete` of a projection gets `409`, since its version no longer exists;
-  - a condition with no `afterSequence`, or a write with no condition, goes through: it holds on any store.
+  - the commit of a transaction begun before the reset gets `409`;
+  - a `replace` or `delete` in `POST /projections` gets `409`, since its version no longer exists;
+  - a `create` in `POST /projections` goes through, on the new store.
 - A reset can get `503 WriteQueueFull`. Closing the connection while it waits takes it out of the queue, and nothing is
   deleted.
 
@@ -1433,11 +1378,11 @@ headers.
 | `401` | `Unauthorized` | A missing or invalid Bearer token, only when `enableAuth` is on (see [Security](https://tamarackdb.github.io/docs/operations/security/#bearer-token)) |
 | `404` | `ProjectionNotFound` | A projection that doesn't exist, read with `GET /projections/{type}/{id}` or in a transaction |
 | `404` | `TransactionNotFound` | A call on a transaction that is unknown, expired, or already over (see [Transactions](https://tamarackdb.github.io/docs/http-api/transactions/#errors)) |
-| `409` | `ConcurrencyException` | `POST /write` or a commit: a condition doesn't hold, or a projection doesn't match the stored one. Any call on a transaction after a store reset. The `message` names the cause (see [Writing](https://tamarackdb.github.io/docs/http-api/write/#conflicts) and [Transactions](https://tamarackdb.github.io/docs/http-api/transactions/#commit)). Nothing was written |
+| `409` | `ConcurrencyException` | A commit or `POST /projections`: a condition doesn't hold, or a projection doesn't match the stored one. Any call on a transaction after a store reset. The `message` names the cause (see [Transactions](https://tamarackdb.github.io/docs/http-api/transactions/#commit) and [Projections](https://tamarackdb.github.io/docs/http-api/projections/#conflicts)). Nothing was written |
 | `413` | `PayloadTooLarge` | An event or a projection over its size limit, or a body over `maxRequestBodySize`. The `message` names the setting |
 | `500` | `InternalError` | An unexpected failure on the server |
-| `503` | `WriteQueueFull` | `POST /write`, a commit, a bulk delete, or `POST /reset`, while too many requests already wait for their turn. Nothing was written |
-| `503` | `ShuttingDown` | `POST /write`, a commit, a bulk delete, or `POST /reset`, waiting or arriving while the server shuts down. Nothing was written |
+| `503` | `WriteQueueFull` | A commit, `POST /projections`, a bulk delete, or `POST /reset`, while too many requests already wait for their turn (see [Conventions](https://tamarackdb.github.io/docs/http-api/conventions/#waiting-for-a-turn)). Nothing was written |
+| `503` | `ShuttingDown` | A commit, `POST /projections`, a bulk delete, or `POST /reset`, waiting or arriving while the server shuts down. Nothing was written |
 | `503` | `Unavailable` | `GET /health` only: SQLite can't be reached (see [Health check](https://tamarackdb.github.io/docs/operations/health-check/)) |
 
 How each code is logged is in [Logs](https://tamarackdb.github.io/docs/operations/logs/).
@@ -1447,23 +1392,22 @@ How each code is logged is in [Logs](https://tamarackdb.github.io/docs/operation
 An endpoint with a body responds `400 InvalidRequest` for:
 
 - **The body**: invalid JSON, anything after the JSON value other than whitespace, or an unknown key at any level.
-- **A query** (`query`, or a condition's `failIfEventsMatch`): missing, not `"all"`, `"none"`, or an array of query
+- **A query**: missing, not `"all"`, `"none"`, or an array of query
   items, an empty array
   where the grammar needs a non-empty one, an empty item, more than 100 items, or more than 100 values in one item (see
   [Query grammar](https://tamarackdb.github.io/docs/http-api/query-grammar/)).
 - **Reading**: a non-integer or negative `afterSequence`, or a `limit` below 1 or above `maxEventsPerPage`.
 - **An event**: a missing `type`, a missing or `null` `payload`, an empty array as a tag value, a duplicate tag, or more
   than 20 identifiers or metadata entries (see [Events](https://tamarackdb.github.io/docs/concepts/events/)).
-- **A condition**: a negative `afterSequence`, an `afterSequence` without `store`, or a `store` without `afterSequence`.
 - **A projection**: a missing `type`, `id`, `version` (for `replace` and `delete`), or `payload` (for `create` and
   `replace`), a key its list doesn't take, or the same `type` + `id` twice in one write.
-- **A write**: more events, conditions, or projections than one write allows (see
-  [Writing](https://tamarackdb.github.io/docs/http-api/write/#limits)), or a commit whose transaction holds more (see
-  [Transactions](https://tamarackdb.github.io/docs/http-api/transactions/#limits)).
+- **A limit**: more projections than one `POST /projections` allows (see
+  [Projections](https://tamarackdb.github.io/docs/http-api/projections/#limits)), or a call that would take a transaction over one of its limits
+  (see [Transactions](https://tamarackdb.github.io/docs/http-api/transactions/#limits)).
 - **A transaction**: a call that breaks one of its rules, such as events written without a read, or a projection
   written without being read first (see [Concepts: Transactions](https://tamarackdb.github.io/docs/concepts/transactions/)).
 
-The `message` names the item at fault by its place in the body, for example `events[3]` or `projections.create[0]`, and
+The `message` names the item at fault by its place in the body, for example `events[3]` or `create[0]`, and
 names the setting behind a limit.
 
 ---
@@ -1482,7 +1426,7 @@ call. TamarackDB knows none of them: it only sees the calls.
 
 | Code | Reacts to | Reads | Writes |
 |---|---|---|---|
-| PlaceOrderModel | the order command | the customer | `order-placed` |
+| PlaceOrderModel | the order command | the customer, and the order | `order-placed`, or nothing if the order exists |
 | EarnPointsModel, run by LoyaltyProcessor | `order-placed` | `"none"`: one point per dollar | `points-earned` |
 | CustomerPointsProjector | `points-earned` | | the `customer-points` projection |
 | PromoteCustomerModel, run by TierProcessor | `points-earned` | the customer's points and promotions | `customer-promoted` at 1,000 points, or nothing |
@@ -1500,21 +1444,23 @@ no say in it.
 ## What the store holds
 
 Customer `c1` has 950 points. Product `p1` received 10 units and has 7 reserved: 3 are left. The customer orders one
-unit of `p1`, for 30 dollars.
+unit of `p1`, for 30 dollars. The order command carries its order ID, `o1`, chosen by the application before it
+sends any call.
 
 In the calls below, `{txId}` stands for the transaction ID, and each response follows its request. Payloads are short
 JSON strings.
 
 ## The order
 
-**PlaceOrderModel** begins the transaction, reads the customer, and places the order.
+**PlaceOrderModel** begins the transaction, reads the customer and the order, and places the order. No
+`order-placed` exists for `o1` yet.
 
 ```
 POST /tx
 200 {"txId":"7d1e4b2a-3c5f-4e6d-9a8b-0c1d2e3f4a5b"}
 
 QUERY /tx/{txId}/events
-{"query":[{"types":["customer-registered"],"identifiers":[{"name":"customerId","value":"c1"}]}]}
+{"query":[{"types":["customer-registered"],"identifiers":[{"name":"customerId","value":"c1"}]},{"types":["order-placed"],"identifiers":[{"name":"orderId","value":"o1"}]}]}
 200
 {"sequence":1,"time":"2026-09-02T08:00:00.000000Z","type":"customer-registered","identifiers":{"customerId":"c1"},"metadata":{},"payload":"{}"}
 {"end":true}
@@ -1660,12 +1606,42 @@ empty write of PromoteCustomerModel is checked like any decision, so the commit 
 The command runs again, PromoteCustomerModel sees 1,020 points, and writes `customer-promoted` (see
 [Transactions](https://tamarackdb.github.io/docs/concepts/transactions/#one-decision-one-read-one-write)).
 
+**A lost response.** Say the connection drops during the commit, and the `204` never arrives. The application can't
+tell whether the order was written, so it runs the whole command again, with the same order ID. PlaceOrderModel's
+read now finds `o1`:
+
+```
+POST /tx
+200 {"txId":"a9c2e5f1-6b3d-4e8a-9c7f-2d1e0b4a8c63"}
+
+QUERY /tx/{txId}/events
+{"query":[{"types":["customer-registered"],"identifiers":[{"name":"customerId","value":"c1"}]},{"types":["order-placed"],"identifiers":[{"name":"orderId","value":"o1"}]}]}
+200
+{"sequence":1,"time":"2026-09-02T08:00:00.000000Z","type":"customer-registered","identifiers":{"customerId":"c1"},"metadata":{},"payload":"{}"}
+{"sequence":46,"time":"2026-10-03T21:11:05.123456Z","type":"order-placed","identifiers":{"orderId":"o1","customerId":"c1","productId":"p1"},"metadata":{},"payload":"{\"quantity\":1,\"total\":30}"}
+{"end":true}
+
+DELETE /tx/{txId}
+204
+```
+
+The order exists: PlaceOrderModel writes nothing, so no `order-placed` is pending, and none of the code that reacts to
+it runs. The application abandons the transaction, and reports the order as placed.
+
+- If the first commit hadn't gone through, the read finds no `o1`, and the order is placed normally.
+- If the first commit was still waiting or running, the read finds no `o1` either. The second commit then comes after
+  the first: its condition on `o1` fails with `409`, and the command runs once more, now finding `o1`.
+- EarnPointsModel reads `"none"`, and yet the points are never earned twice: it only runs when PlaceOrderModel writes
+  an `order-placed` in the same transaction.
+- Had PlaceOrderModel read only the customer, the command run again would place `o1` a second time (see
+  [A lost response](https://tamarackdb.github.io/docs/http-api/transactions/#a-lost-response)).
+
 ## A projector that catches up: sales by day
 
 A projector that makes no decision doesn't use a transaction. DailySalesProjector keeps one `daily-sales` projection per
 day, from the `order-placed` events. It keeps its position, a store ID and the last Sequence Position processed, in a
-projection of its own, `projector-position/daily-sales`. It runs in a loop, one page at a time, with
-[`POST /write`](https://tamarackdb.github.io/docs/http-api/write/).
+projection of its own, `projector-position/daily-sales`. It runs in a loop, one page at a time, and writes with
+[`POST /projections`](https://tamarackdb.github.io/docs/http-api/projections/#writing-projections).
 
 1. It reads its position, and keeps its version:
 
@@ -1690,12 +1666,16 @@ projection of its own, `projector-position/daily-sales`. It runs in a loop, one 
 4. It writes the days and its new position in one write, each with the version it read:
 
    ```
-   POST /write
-   {"projections":{
+   POST /projections
+   {
      "create":[{"type":"daily-sales","id":"2026-10-03","payload":"{\"orders\":1,\"total\":30}"}],
      "replace":[{"type":"projector-position","id":"daily-sales","version":"1b2c3d4e-5f60-4718-9a0b-c1d2e3f4a5b6","payload":"{\"store\":\"5b0c7e2a-1f4d-4a9b-8c3e-6d2f1a0b9e47\",\"sequence\":187}"}]
-   }}
+   }
+   200
+   {"create":[{"version":"5a6b7c8d-9e0f-4a1b-8c2d-3e4f5a6b7c8d"}],"replace":[{"version":"d4c3b2a1-0f9e-4d8c-b7a6-5f4e3d2c1b0a"}]}
    ```
+
+   It keeps the new version of its position for the next page.
 
 5. A `409` means another instance, or a rebuild, changed the position or a day since it read them. Nothing was written:
    it starts over at step 1.
@@ -1706,10 +1686,13 @@ projection of its own, `projector-position/daily-sales`. It runs in a loop, one 
   crash between two pages.
 - Two instances that cross get a `409` on the position. The server doesn't know which projector writes what: the
   version keeps them apart.
+- A reset between its read and its write deletes the position, so the `replace` of the position gets `409`: days
+  computed from the old store are never written to the new one. This is one reason the position goes in the same
+  `POST /projections` as the days.
 - The projection may use `sequence` and `time`: the events it reads are already committed (see
   [Projections](https://tamarackdb.github.io/docs/concepts/projections/#what-a-projection-may-use)).
 - A rebuild deletes the `daily-sales` projections with a [bulk delete](https://tamarackdb.github.io/docs/http-api/projections/#bulk-delete), and
-  the position with `POST /write`. The projector then starts from the beginning.
+  the position with `POST /projections`. The projector then starts from the beginning.
 
 ---
 
@@ -1756,11 +1739,13 @@ Key words in capitals follow [RFC 2119](https://tamarackdb.github.io/docs/concep
 
 ## Lost responses
 
-- A commit whose response is lost can't be sent again. The client checks whether the write happened, for example by
-  reading a projection the transaction wrote (see [Commit](https://tamarackdb.github.io/docs/http-api/transactions/#a-lost-response)).
-- A `POST /write` whose response is lost can be sent again with the same Append Conditions. A unique `writeId` in the
-  metadata, with a condition on it, makes any write safe to retry (see
-  [A lost response](https://tamarackdb.github.io/docs/http-api/write/#a-lost-response)).
+- A commit whose response is lost can't be sent again. The application runs the command again, in a new transaction.
+  An event written by a decision whose read doesn't match it, and not in reaction to one whose read does, would be
+  written twice: the command MUST find out by other means (see
+  [A lost response](https://tamarackdb.github.io/docs/http-api/transactions/#a-lost-response)).
+- A `POST /projections` whose response is lost MAY be sent again as is: it's never applied twice. A `409` on the retry
+  doesn't say which attempt won, so the client reads the projections again (see
+  [A lost response](https://tamarackdb.github.io/docs/http-api/projections/#a-lost-response)).
 
 ## Testing
 
@@ -2030,8 +2015,10 @@ A file that holds `authToken` is a secret: see [Security](https://tamarackdb.git
 | `maxEventsPerPage` | `TAMARACKDB_MAX_EVENTS_PER_PAGE` | `10000` | The highest `limit` a `QUERY /events` may ask for |
 | `maxEventSize` | `TAMARACKDB_MAX_EVENT_SIZE` | `65536` (64 KiB) | The largest event, in bytes (see [Events](https://tamarackdb.github.io/docs/concepts/events/#size)) |
 | `maxProjectionSize` | `TAMARACKDB_MAX_PROJECTION_SIZE` | `65536` (64 KiB) | The largest projection, in bytes: its `type`, `id`, and `payload` together |
-| `maxEventsPerWrite` | `TAMARACKDB_MAX_EVENTS_PER_WRITE` | `100` | The most events, and the most Append Conditions, in one write: a `POST /write`, or a transaction's commit |
-| `maxProjectionsPerWrite` | `TAMARACKDB_MAX_PROJECTIONS_PER_WRITE` | `500` | The most projections in one write: a `POST /write`, or a transaction's commit |
+| `maxEventsPerTx` | `TAMARACKDB_MAX_EVENTS_PER_TX` | `100` | The most events one transaction writes, across all its writes of events (see [Transactions](https://tamarackdb.github.io/docs/http-api/transactions/#limits)) |
+| `maxReadsPerTx` | `TAMARACKDB_MAX_READS_PER_TX` | `100` | The most reads of events in one transaction, those followed by an empty write included |
+| `maxProjectionsPerTx` | `TAMARACKDB_MAX_PROJECTIONS_PER_TX` | `500` | The most distinct projections one transaction writes, across all its writes of projections |
+| `maxProjectionsPerWrite` | `TAMARACKDB_MAX_PROJECTIONS_PER_WRITE` | `500` | The most projections in one `POST /projections` (see [Projections](https://tamarackdb.github.io/docs/http-api/projections/#limits)) |
 | `maxRequestBodySize` | `TAMARACKDB_MAX_REQUEST_BODY_SIZE` | `8388608` (8 MiB) | The largest request body, in bytes, for every endpoint |
 | `maxQueuedWrites` | `TAMARACKDB_MAX_QUEUED_WRITES` | `100` | The most requests waiting for their turn at once (see below) |
 | `readPoolSize` | `TAMARACKDB_READ_POOL_SIZE` | `8` | SQLite connections for reads, and so how many reads run at once |
@@ -2058,12 +2045,13 @@ A file that holds `authToken` is a secret: see [Security](https://tamarackdb.git
 
 ## Limits
 
-- The size and count limits (`maxEventSize`, `maxProjectionSize`, `maxEventsPerWrite`, `maxProjectionsPerWrite`,
-  `maxRequestBodySize`) are a cautious starting point. Find the real limits in development, with the application's data,
-  then set the same values in production. Every error from a limit names the setting to raise (see
-  [Writing](https://tamarackdb.github.io/docs/http-api/write/#limits) and [Transactions](https://tamarackdb.github.io/docs/http-api/transactions/#limits)).
-- `maxRequestBodySize` isn't checked against the other limits: it's the real bound on a write, and the others are rules
-  for each item.
+- The size and count limits (`maxEventSize`, `maxProjectionSize`, `maxEventsPerTx`, `maxReadsPerTx`,
+  `maxProjectionsPerTx`, `maxProjectionsPerWrite`, `maxRequestBodySize`) are a cautious starting point. Find the real
+  limits in development, with the application's data, then set the same values in production. Every error from a limit
+  names the setting to raise (see [Transactions](https://tamarackdb.github.io/docs/http-api/transactions/#limits) and
+  [Projections](https://tamarackdb.github.io/docs/http-api/projections/#limits)).
+- `maxRequestBodySize` isn't checked against the other limits. It bounds one request, not a transaction, which is
+  built over many requests: the transaction limits bound how long its commit holds the turn.
 - `defaultEventsPerPage` and `maxEventsPerPage` are settings, not constants, because how fast a projector processes a
   batch varies between applications, and between projectors of one application. The defaults keep a default page easy to
   buffer, and a maximum page done in seconds.
@@ -2074,9 +2062,9 @@ A file that holds `authToken` is a secret: see [Security](https://tamarackdb.git
 
 ## Sizing the write queue
 
-`maxQueuedWrites` bounds how many requests wait for their turn at once: `POST /write`, a transaction's commit, the bulk
-deletes of projections, `POST /reset`, and the hourly `PRAGMA optimize`. They're served one at a time, in the order they arrive. One more
-gets `503 WriteQueueFull` instead of joining.
+`maxQueuedWrites` bounds how many requests wait for their turn at once: a transaction's commit, `POST /projections`,
+the bulk deletes of projections, `POST /reset`, and the hourly `PRAGMA optimize`. They're served one at a time, in the
+order they arrive. One more gets `503 WriteQueueFull` instead of joining.
 
 - A write holds the turn only while its own SQLite transaction runs, usually a few milliseconds, so the queue is usually
   empty or short. Reads never wait in it.
@@ -2254,9 +2242,9 @@ curl http://127.0.0.1:8085/stats
 
 | Counter | What it counts |
 |---|---|
-| `writes.committed` | Writes committed: transaction commits that wrote something, and `POST /write` calls |
-| `writes.conflicts.condition` | Writes refused with `409` because a condition no longer held, or the store changed |
-| `writes.conflicts.projection` | Writes refused with `409` because a projection wasn't at the version read |
+| `writes.committed` | Writes committed: transaction commits that wrote something, and `POST /projections` calls |
+| `writes.conflicts.condition` | Transaction commits refused with `409` because a condition no longer held, or the store changed |
+| `writes.conflicts.projection` | Writes refused with `409` because a projection wasn't at the version read: transaction commits and `POST /projections` calls |
 | `writes.writeQueueFull` | Requests turned away with `503 WriteQueueFull` |
 | `transactions.begun` | Transactions begun |
 | `transactions.committed` | Transactions committed, including those with nothing to write |
@@ -2291,13 +2279,13 @@ The server logs one line per request to stdout.
 ## The line
 
 ```
-tamarackdb-server: [WARNING] POST /write 503 27B 0.07ms
+tamarackdb-server: [WARNING] POST /projections 503 27B 0.07ms
 ```
 
 - It carries the level, the method, the path, the status code, the response size, and the time taken.
 - It's written once the handler ends. It wraps the whole routed handler, authentication included, so a request
   turned away with `401` is logged like any other.
-- It never carries a request or response body: queries, conditions, and events never reach the log.
+- It never carries a request or response body: queries, events, and projections never reach the log.
 - `logLevel` sets the lowest level written: `debug`, `info`, `warning`, or `error`. The default, `warning`, prints
   only `warning` and `error` lines. Set it to `debug` to see every request while testing an integration.
 
