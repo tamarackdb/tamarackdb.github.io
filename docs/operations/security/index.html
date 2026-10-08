@@ -21,7 +21,19 @@ sets it to <code>socketMode</code>.</p></li></ul><p><strong>Why the umask.</stro
 connection could slip in before <code>socketMode</code> is applied.</p><h2 id=another-host>Another host<a href=#another-host class=anchor aria-hidden=true>#</a></h2><p>The server speaks plain HTTP only, on the socket and over TCP alike. A client on another host, application or backup,
 MUST go through a reverse proxy that handles TLS.</p><ul><li><p>Without TLS, bodies and the <code>authToken</code> itself travel in clear text over a network outside your control.</p></li><li><p>Put the proxy in front of the socket. Caddy, for example, gets and renews its certificates by itself:</p><div class=expressive-code><figure class="frame not-content"><figcaption class=header><span class=title></span></figcaption><pre tabindex=0><code>tamarackdb.example.com {
     reverse_proxy unix//run/tamarackdb/tamarackdb.sock
-}</code></pre></figure></div></li><li><p>The proxy&rsquo;s user MUST be allowed by <code>socketMode</code>, like the application&rsquo;s.</p></li><li><p>Turn <code>enableAuth</code> on: once the proxy is up, the API is reachable over the network, and the token is what keeps others
+}</code></pre></figure></div><p>With nginx:</p><div class=expressive-code><figure class="frame not-content"><figcaption class=header><span class=title></span></figcaption><div class=highlight><pre tabindex=0 class=chroma><code class=language-nginx data-lang=nginx><span class=line><span class=cl><span class=k>server</span> <span class=p>{</span>
+</span></span><span class=line><span class=cl>    <span class=kn>listen</span> <span class=mi>443</span> <span class=s>ssl</span><span class=p>;</span>
+</span></span><span class=line><span class=cl>    <span class=kn>server_name</span> <span class=s>tamarackdb.example.com</span><span class=p>;</span>
+</span></span><span class=line><span class=cl>    <span class=kn>ssl_certificate</span>     <span class=s>/etc/ssl/tamarackdb.example.com/fullchain.pem</span><span class=p>;</span>
+</span></span><span class=line><span class=cl>    <span class=kn>ssl_certificate_key</span> <span class=s>/etc/ssl/tamarackdb.example.com/privkey.pem</span><span class=p>;</span>
+</span></span><span class=line><span class=cl>    <span class=kn>client_max_body_size</span> <span class=mi>8m</span><span class=p>;</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl>    <span class=kn>location</span> <span class=s>/</span> <span class=p>{</span>
+</span></span><span class=line><span class=cl>        <span class=kn>proxy_pass</span> <span class=s>http://unix:/run/tamarackdb/tamarackdb.sock:</span><span class=p>;</span>
+</span></span><span class=line><span class=cl>    <span class=p>}</span>
+</span></span><span class=line><span class=cl><span class=p>}</span></span></span></code></pre></div></figure></div></li><li><p>nginx refuses a body larger than 1 MiB by default. Set <code>client_max_body_size</code> to the server&rsquo;s
+<code>maxRequestBodySize</code> (see
+<a class="link link--text" href=/docs/operations/configuration/#settings>Configuration</a>).</p></li><li><p>The proxy&rsquo;s user MUST be allowed by <code>socketMode</code>, like the application&rsquo;s.</p></li><li><p>Turn <code>enableAuth</code> on: once the proxy is up, the API is reachable over the network, and the token is what keeps others
 out. The proxy passes the <code>Authorization</code> header through unchanged.</p></li><li><p>In Docker, the server listens over TCP: how to keep its port private is in
 <a class="link link--text" href=/docs/operations/install/#docker>Install</a>.</p></li></ul><p><strong>Why a proxy, not TLS in the server.</strong> A server that loads its certificate once at startup would need a restart,
 cutting off any write in progress, each time a short-lived certificate is renewed; a proxy renews on its own. It also

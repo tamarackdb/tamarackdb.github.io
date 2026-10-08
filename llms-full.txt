@@ -2060,6 +2060,13 @@ RuntimeDirectory=tamarackdb
 RuntimeDirectoryMode=0755
 StateDirectory=tamarackdb
 StateDirectoryMode=0700
+# Read-only system, no access to /home, a private /tmp, no privilege gain.
+# The directories above stay writable.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+NoNewPrivileges=true
 
 [Install]
 WantedBy=multi-user.target
@@ -2352,6 +2359,25 @@ MUST go through a reverse proxy that handles TLS.
       reverse_proxy unix//run/tamarackdb/tamarackdb.sock
   }
   ```
+
+  With nginx:
+
+  ```nginx
+  server {
+      listen 443 ssl;
+      server_name tamarackdb.example.com;
+      ssl_certificate     /etc/ssl/tamarackdb.example.com/fullchain.pem;
+      ssl_certificate_key /etc/ssl/tamarackdb.example.com/privkey.pem;
+      client_max_body_size 8m;
+
+      location / {
+          proxy_pass http://unix:/run/tamarackdb/tamarackdb.sock:;
+      }
+  }
+  ```
+
+- nginx refuses a body larger than 1 MiB by default. Set `client_max_body_size` to the server's
+  `maxRequestBodySize` (see [Configuration](https://tamarackdb.github.io/docs/operations/configuration/#settings)).
 
 - The proxy's user MUST be allowed by `socketMode`, like the application's.
 - Turn `enableAuth` on: once the proxy is up, the API is reachable over the network, and the token is what keeps others

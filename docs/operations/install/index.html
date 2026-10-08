@@ -58,6 +58,13 @@ from another host, through a reverse proxy that handles TLS (see
 </span></span><span class=line><span class=cl><span class=na>RuntimeDirectoryMode</span><span class=o>=</span><span class=s>0755</span>
 </span></span><span class=line><span class=cl><span class=na>StateDirectory</span><span class=o>=</span><span class=s>tamarackdb</span>
 </span></span><span class=line><span class=cl><span class=na>StateDirectoryMode</span><span class=o>=</span><span class=s>0700</span>
+</span></span><span class=line><span class=cl><span class=c1># Read-only system, no access to /home, a private /tmp, no privilege gain.</span>
+</span></span><span class=line><span class=cl><span class=c1># The directories above stay writable.</span>
+</span></span><span class=line><span class=cl><span class=na>ProtectSystem</span><span class=o>=</span><span class=s>strict</span>
+</span></span><span class=line><span class=cl><span class=na>ProtectHome</span><span class=o>=</span><span class=s>true</span>
+</span></span><span class=line><span class=cl><span class=na>PrivateTmp</span><span class=o>=</span><span class=s>true</span>
+</span></span><span class=line><span class=cl><span class=na>PrivateDevices</span><span class=o>=</span><span class=s>true</span>
+</span></span><span class=line><span class=cl><span class=na>NoNewPrivileges</span><span class=o>=</span><span class=s>true</span>
 </span></span><span class=line><span class=cl>
 </span></span><span class=line><span class=cl><span class=k>[Install]</span>
 </span></span><span class=line><span class=cl><span class=na>WantedBy</span><span class=o>=</span><span class=s>multi-user.target</span></span></span></code></pre></div></figure></div><p>With this <code>config.toml</code>, readable by <code>tamarackdb</code> only:</p><div class=expressive-code><figure class="frame not-content"><figcaption class=header><span class=title></span></figcaption><div class=highlight><pre tabindex=0 class=chroma><code class=language-toml data-lang=toml><span class=line><span class=cl><span class=p>[</span><span class=nx>server</span><span class=p>]</span>
