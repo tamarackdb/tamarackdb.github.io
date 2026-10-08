@@ -42,7 +42,7 @@ POST /tx/{txId}/events
 200 {&#34;points&#34;:950}
 
 POST /tx/{txId}/projections
-{&#34;upsert&#34;:[{&#34;type&#34;:&#34;customer-points&#34;,&#34;id&#34;:&#34;c1&#34;,&#34;payload&#34;:&#34;{\&#34;points\&#34;:980}&#34;}]}
+{&#34;replace&#34;:[{&#34;type&#34;:&#34;customer-points&#34;,&#34;id&#34;:&#34;c1&#34;,&#34;payload&#34;:&#34;{\&#34;points\&#34;:980}&#34;}]}
 200 {&#34;time&#34;:&#34;2026-10-03T21:11:05.151877Z&#34;}</code></pre></figure></div><p><strong>TierProcessor</strong> reacts to <code>points-earned</code> too. Its <strong>PromoteCustomerModel</strong> sees the committed points, then the
 pending ones, with no <code>sequence</code>. 980 points is below the threshold: it writes nothing, and the empty write still
 closes its read. No <code>customer-promoted</code> event exists, so CustomerProfileProjector doesn&rsquo;t run.</p><div class=expressive-code><figure class="frame not-content"><figcaption class=header><span class=title></span></figcaption><pre tabindex=0><code>QUERY /tx/{txId}/events
@@ -55,11 +55,8 @@ closes its read. No <code>customer-promoted</code> event exists, so CustomerProf
 POST /tx/{txId}/events
 {&#34;events&#34;:[]}
 200 {&#34;time&#34;:&#34;2026-10-03T21:11:05.160032Z&#34;}</code></pre></figure></div><p><strong>OrderSummaryProjector</strong> reacts to <code>order-placed</code>, long after PlaceOrderModel wrote it. That&rsquo;s fine: a projection
-always follows a decision already made.</p><div class=expressive-code><figure class="frame not-content"><figcaption class=header><span class=title></span></figcaption><pre tabindex=0><code>GET /tx/{txId}/projections/order-summary/o1
-404 {&#34;error&#34;:&#34;ProjectionNotFound&#34;}
-
-POST /tx/{txId}/projections
-{&#34;upsert&#34;:[{&#34;type&#34;:&#34;order-summary&#34;,&#34;id&#34;:&#34;o1&#34;,&#34;payload&#34;:&#34;{\&#34;status\&#34;:\&#34;placed\&#34;,\&#34;total\&#34;:30}&#34;}]}
+always follows a decision already made. The order is new, so the projector creates its summary without reading it first.</p><div class=expressive-code><figure class="frame not-content"><figcaption class=header><span class=title></span></figcaption><pre tabindex=0><code>POST /tx/{txId}/projections
+{&#34;create&#34;:[{&#34;type&#34;:&#34;order-summary&#34;,&#34;id&#34;:&#34;o1&#34;,&#34;payload&#34;:&#34;{\&#34;status\&#34;:\&#34;placed\&#34;,\&#34;total\&#34;:30}&#34;}]}
 200 {&#34;time&#34;:&#34;2026-10-03T21:11:05.171590Z&#34;}</code></pre></figure></div><p><strong>StockProcessor</strong> reacts to <code>order-placed</code>. Its <strong>ReserveStockModel</strong> finds 3 units left, and reserves one.</p><div class=expressive-code><figure class="frame not-content"><figcaption class=header><span class=title></span></figcaption><pre tabindex=0><code>QUERY /tx/{txId}/events
 {&#34;query&#34;:[{&#34;types&#34;:[&#34;stock-received&#34;,&#34;stock-reserved&#34;],&#34;identifiers&#34;:[{&#34;name&#34;:&#34;productId&#34;,&#34;value&#34;:&#34;p1&#34;}]}]}
 200
@@ -80,18 +77,15 @@ more.</p><div class=expressive-code><figure class="frame not-content"><figcaptio
 
 POST /tx/{txId}/events
 {&#34;events&#34;:[{&#34;type&#34;:&#34;restock-requested&#34;,&#34;identifiers&#34;:{&#34;productId&#34;:&#34;p1&#34;},&#34;payload&#34;:&#34;{\&#34;quantity\&#34;:10}&#34;}]}
-200 {&#34;time&#34;:&#34;2026-10-03T21:11:05.195548Z&#34;}</code></pre></figure></div><p><strong>PurchasingQueueProjector</strong> reacts to <code>restock-requested</code>, then <strong>StockLevelProjector</strong> reacts to <code>stock-reserved</code>.</p><div class=expressive-code><figure class="frame not-content"><figcaption class=header><span class=title></span></figcaption><pre tabindex=0><code>GET /tx/{txId}/projections/purchasing-queue/p1
-404 {&#34;error&#34;:&#34;ProjectionNotFound&#34;}
-
-POST /tx/{txId}/projections
-{&#34;upsert&#34;:[{&#34;type&#34;:&#34;purchasing-queue&#34;,&#34;id&#34;:&#34;p1&#34;,&#34;payload&#34;:&#34;{\&#34;quantity\&#34;:10}&#34;}]}
+200 {&#34;time&#34;:&#34;2026-10-03T21:11:05.195548Z&#34;}</code></pre></figure></div><p><strong>PurchasingQueueProjector</strong> reacts to <code>restock-requested</code>, then <strong>StockLevelProjector</strong> reacts to <code>stock-reserved</code>.</p><div class=expressive-code><figure class="frame not-content"><figcaption class=header><span class=title></span></figcaption><pre tabindex=0><code>POST /tx/{txId}/projections
+{&#34;create&#34;:[{&#34;type&#34;:&#34;purchasing-queue&#34;,&#34;id&#34;:&#34;p1&#34;,&#34;payload&#34;:&#34;{\&#34;quantity\&#34;:10}&#34;}]}
 200 {&#34;time&#34;:&#34;2026-10-03T21:11:05.204411Z&#34;}
 
 GET /tx/{txId}/projections/stock-level/p1
 200 {&#34;available&#34;:3}
 
 POST /tx/{txId}/projections
-{&#34;upsert&#34;:[{&#34;type&#34;:&#34;stock-level&#34;,&#34;id&#34;:&#34;p1&#34;,&#34;payload&#34;:&#34;{\&#34;available\&#34;:2}&#34;}]}
+{&#34;replace&#34;:[{&#34;type&#34;:&#34;stock-level&#34;,&#34;id&#34;:&#34;p1&#34;,&#34;payload&#34;:&#34;{\&#34;available\&#34;:2}&#34;}]}
 200 {&#34;time&#34;:&#34;2026-10-03T21:11:05.213907Z&#34;}</code></pre></figure></div><p>Every piece of code has run: the application commits.</p><div class=expressive-code><figure class="frame not-content"><figcaption class=header><span class=title></span></figcaption><pre tabindex=0><code>POST /tx/{txId}/commit
 204</code></pre></figure></div><p>The four events are now in the log, each with the <code>time</code> of its write, and four projections are written. The
 transaction read events five times, so it carried five conditions, <code>conditions[0]</code> to <code>conditions[4]</code>, in that order.</p><h2 id=when-something-changes-in-between>When something changes in between<a href=#when-something-changes-in-between class=anchor aria-hidden=true>#</a></h2><p><strong>The last unit.</strong> Say another order for <code>p1</code> committed a <code>stock-reserved</code> after ReserveStockModel read the stock. The

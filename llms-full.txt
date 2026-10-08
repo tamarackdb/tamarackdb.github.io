@@ -314,13 +314,14 @@ again, sees 1,020 points, and promotes the customer.
 
 - Projections are read and written only while no condition is open. A decision rests on events, never on a
   projection.
-- A projection MUST be read in the transaction before it's written. The server then knows its version, or that it
-  doesn't exist.
-- A write of projections upserts or deletes. Deleting a projection that doesn't exist does nothing. One write names a
-  projection at most once.
+- A write of projections creates, replaces, or deletes, with the same three lists as outside a transaction, but
+  without versions: the server knows the version of each projection read.
+- A projection MUST be read in the transaction before it's replaced or deleted. A projection created needs no read: the
+  server takes it as absent, and checks at commit that it still is.
+- Deleting a projection that doesn't exist does nothing. One write names a projection at most once.
 - A later read returns the projection as the transaction left it.
 - At commit, the server turns what the transaction did to each projection into one create, replace, or delete, at the
-  version read. A projection the transaction only read is neither written nor checked.
+  version read. A projection deleted then created again, for example, becomes one replace. A projection the transaction only read is neither written nor checked.
 
 What a projection may use is in [Projections](https://tamarackdb.github.io/docs/concepts/projections/#what-a-projection-may-use).
 
@@ -617,17 +618,17 @@ The calls are in [HTTP API: Projections](https://tamarackdb.github.io/docs/http-
 
 Every projection has a version, a random UUID (version 4), new on every write.
 
-- In a transaction, the server keeps the version of each projection read, and the client never sees it (see
-  [Transactions](https://tamarackdb.github.io/docs/concepts/transactions/#projections-in-a-transaction)). At commit, the server checks it the same
-  way as below.
-- With [`POST /projections`](https://tamarackdb.github.io/docs/http-api/projections/#writing-projections), a write changes a projection with one
-  of three operations:
+- A write changes a projection with one of three operations:
   - `create`: the `type` + `id` MUST be free.
-  - `replace`: the stored version MUST be the one given. The whole payload is replaced.
-  - `delete`: the stored version MUST be the one given.
+  - `replace`: the stored version MUST be the one read. The whole payload is replaced.
+  - `delete`: the stored version MUST be the one read.
+- With [`POST /projections`](https://tamarackdb.github.io/docs/http-api/projections/#writing-projections), the client sends the version it read
+  with each `replace` and `delete`.
+- In a transaction, the server keeps the version of each projection read, and the client never sees it (see
+  [Transactions](https://tamarackdb.github.io/docs/concepts/transactions/#projections-in-a-transaction)).
 - An operation that doesn't hold fails the whole write with `409 ConcurrencyException`. A `replace` or `delete` of a
   projection that no longer exists fails the same way: another write deleted it since it was read.
-- A `409` on a projection means another write changed it since it was read. Read it again and redo the work, in a new
+- A `409` on a projection means another write changed it since it was read, or created it. Read it again and redo the work, in a new
   transaction or a new write.
 - Only the projections a write changes are checked, never the ones it only read (see
   [Append Condition](https://tamarackdb.github.io/docs/concepts/append-condition/#what-a-condition-doesnt-cover)).
@@ -1006,7 +1007,7 @@ Key words in capitals follow [RFC 2119](https://tamarackdb.github.io/docs/concep
 | [`QUERY /tx/{txId}/events`](#reading-events) | `{"query": ...}` | `200`, NDJSON |
 | [`POST /tx/{txId}/events`](#writing-events) | `{"events": [...]}` | `200 {"time": "..."}` |
 | [`GET /tx/{txId}/projections/{type}/{id}`](#reading-a-projection) | none | `200`, the payload |
-| [`POST /tx/{txId}/projections`](#writing-projections) | `{"upsert": [...], "delete": [...]}` | `200 {"time": "..."}` |
+| [`POST /tx/{txId}/projections`](#writing-projections) | `{"create": [...], "replace": [...], "delete": [...]}` | `200 {"time": "..."}` |
 | [`POST /tx/{txId}/commit`](#commit) | none | `204` |
 | [`DELETE /tx/{txId}`](#abandon) | none | `204` |
 
@@ -1097,6 +1098,7 @@ curl -i http://127.0.0.1:8085/tx/7d1e4b2a-3c5f-4e6d-9a8b-0c1d2e3f4a5b/projection
 
 - `200 OK`: the payload, exactly as written, in `text/plain; charset=utf-8`, with no version header.
 - `404 ProjectionNotFound`: the projection doesn't exist, or the transaction deleted it.
+- The read isn't needed before a `create` (see [Writing projections](#writing-projections)).
 - The first read of a projection in a transaction reads the store. Every later one returns the projection as the
   transaction left it.
 - A read is refused while a condition is open.
@@ -1107,8 +1109,9 @@ curl -i http://127.0.0.1:8085/tx/7d1e4b2a-3c5f-4e6d-9a8b-0c1d2e3f4a5b/projection
 curl -X POST http://127.0.0.1:8085/tx/7d1e4b2a-3c5f-4e6d-9a8b-0c1d2e3f4a5b/projections \
   -H "Content-Type: application/json" \
   -d '{
-    "upsert": [ { "type": "show-seats", "id": "s1", "payload": "{\"free\":37}" } ],
-    "delete": [ { "type": "seat-hold", "id": "s1-A6" } ]
+    "create":  [ { "type": "seat-hold", "id": "s1-B2", "payload": "{\"customer\":\"c7\"}" } ],
+    "replace": [ { "type": "show-seats", "id": "s1", "payload": "{\"free\":37}" } ],
+    "delete":  [ { "type": "seat-hold", "id": "s1-A6" } ]
   }'
 ```
 
@@ -1118,18 +1121,27 @@ curl -X POST http://127.0.0.1:8085/tx/7d1e4b2a-3c5f-4e6d-9a8b-0c1d2e3f4a5b/proje
 
 | Key | What it holds |
 |---|---|
-| `upsert` | `type`, `id`, `payload`: the projection's whole new payload |
+| `create` | `type`, `id`, `payload`: a projection that MUST NOT exist in the transaction |
+| `replace` | `type`, `id`, `payload`: a projection that MUST exist in the transaction. The whole payload is replaced |
 | `delete` | `type`, `id` |
 
-- At least one of the two lists MUST be non-empty. A key left out is an empty list.
-- Every projection MUST have been read in the transaction first. No version is sent: the server knows the one read.
-- A `payload` is a string, and an empty string is valid. A missing or `null` payload gets `400`.
-- One write names a projection at most once, across the two lists.
+- At least one of the three lists MUST be non-empty. A key left out is an empty list.
+- No version is sent: the server knows the one read.
+- A `create` needs no read. The server takes the projection as absent, and checks at commit that it still is.
+- A projection to `replace` or `delete` MUST have been read in the transaction first, or created in it.
+- A projection exists in the transaction when a read in it would find it. A `create` of a projection that exists, or
+  a `replace` of one that doesn't, gets `400`.
 - Deleting a projection that doesn't exist does nothing.
+- A `payload` is a string, and an empty string is valid. A missing or `null` payload gets `400`.
+- One write names a projection at most once, across the three lists.
 - A projection over `maxProjectionSize` gets `413`.
 - A write that would take the transaction over `maxProjectionsPerTx` projections gets `400` (see [Limits](#limits)).
 - A write is refused while a condition is open.
 - `time` is the time of the write, by the server's clock: the response has the same shape as a write of events.
+
+**Why a `create` needs no read.** An application that creates a projection knows it doesn't exist yet, for example a
+projector that handles `user-created`. A read would only tell the server what the application already knows. A
+`replace` or a `delete` needs a read: the commit checks the version read.
 
 ## Commit
 
@@ -1154,6 +1166,7 @@ A conflict gets `409 ConcurrencyException`, and nothing is written. The `message
 | An event that matches the query of the transaction's third read was committed after that read | `conditions[2] no longer holds` |
 | A projection no longer has the version read | `projection show-seats/s1 no longer has the version read` |
 | A projection read as missing was created since | `projection seat-hold/s1-A6 was created by another write since it was read` |
+| A projection created without a read already exists | `projection seat-hold/s1-B2 already exists` |
 
 After a `409`, the client runs the whole command again, in a new transaction.
 
@@ -1201,7 +1214,7 @@ Three settings bound a transaction, across all its calls (see
 |---|---|
 | `maxEventsPerTx` | The events the transaction writes, across all its writes of events |
 | `maxReadsPerTx` | Its reads of events, those followed by an empty write included |
-| `maxProjectionsPerTx` | The distinct projections it writes, across all its writes of projections, `upsert` and `delete` together. A projection written twice counts once |
+| `maxProjectionsPerTx` | The distinct projections it writes, across all its writes of projections, `create`, `replace`, and `delete` together. A projection written twice counts once |
 
 - Each call is checked before it does anything. The call that would go over gets `400 InvalidRequest`, and the
   `message` names the setting, for example `the transaction would read events 101 times, more than maxReadsPerTx
@@ -1619,7 +1632,7 @@ An endpoint with a body responds `400 InvalidRequest` for:
   [Projections](https://tamarackdb.github.io/docs/http-api/projections/#limits)), or a call that would take a transaction over one of its limits
   (see [Transactions](https://tamarackdb.github.io/docs/http-api/transactions/#limits)).
 - **A transaction**: a call that breaks one of its rules, such as events written without a read, or a projection
-  written without being read first (see [Concepts: Transactions](https://tamarackdb.github.io/docs/concepts/transactions/)).
+  replaced without being read first (see [Concepts: Transactions](https://tamarackdb.github.io/docs/concepts/transactions/)).
 
 The `message` names the item at fault by its place in the body, for example `events[3]` or `create[0]`, and
 names the setting behind a limit.
@@ -1704,7 +1717,7 @@ GET /tx/{txId}/projections/customer-points/c1
 200 {"points":950}
 
 POST /tx/{txId}/projections
-{"upsert":[{"type":"customer-points","id":"c1","payload":"{\"points\":980}"}]}
+{"replace":[{"type":"customer-points","id":"c1","payload":"{\"points\":980}"}]}
 200 {"time":"2026-10-03T21:11:05.151877Z"}
 ```
 
@@ -1726,14 +1739,11 @@ POST /tx/{txId}/events
 ```
 
 **OrderSummaryProjector** reacts to `order-placed`, long after PlaceOrderModel wrote it. That's fine: a projection
-always follows a decision already made.
+always follows a decision already made. The order is new, so the projector creates its summary without reading it first.
 
 ```
-GET /tx/{txId}/projections/order-summary/o1
-404 {"error":"ProjectionNotFound"}
-
 POST /tx/{txId}/projections
-{"upsert":[{"type":"order-summary","id":"o1","payload":"{\"status\":\"placed\",\"total\":30}"}]}
+{"create":[{"type":"order-summary","id":"o1","payload":"{\"status\":\"placed\",\"total\":30}"}]}
 200 {"time":"2026-10-03T21:11:05.171590Z"}
 ```
 
@@ -1772,18 +1782,15 @@ POST /tx/{txId}/events
 **PurchasingQueueProjector** reacts to `restock-requested`, then **StockLevelProjector** reacts to `stock-reserved`.
 
 ```
-GET /tx/{txId}/projections/purchasing-queue/p1
-404 {"error":"ProjectionNotFound"}
-
 POST /tx/{txId}/projections
-{"upsert":[{"type":"purchasing-queue","id":"p1","payload":"{\"quantity\":10}"}]}
+{"create":[{"type":"purchasing-queue","id":"p1","payload":"{\"quantity\":10}"}]}
 200 {"time":"2026-10-03T21:11:05.204411Z"}
 
 GET /tx/{txId}/projections/stock-level/p1
 200 {"available":3}
 
 POST /tx/{txId}/projections
-{"upsert":[{"type":"stock-level","id":"p1","payload":"{\"available\":2}"}]}
+{"replace":[{"type":"stock-level","id":"p1","payload":"{\"available\":2}"}]}
 200 {"time":"2026-10-03T21:11:05.213907Z"}
 ```
 
@@ -1944,7 +1951,8 @@ Key words in capitals follow [RFC 2119](https://tamarackdb.github.io/docs/concep
 
 - After a read of events, the next call MUST be the write of events that closes it, with events or an empty list
   (see [Transactions](https://tamarackdb.github.io/docs/concepts/transactions/#one-decision-one-read-one-write)).
-- A projection MUST be read in the transaction before it's written.
+- A projection MUST be read in the transaction before it's replaced or deleted. A `create` needs no read (see
+  [Transactions](https://tamarackdb.github.io/docs/http-api/transactions/#writing-projections)).
 - After a `409 ConcurrencyException`, or a `404 TransactionNotFound`, the client MUST run the whole command again, in
   a new transaction. Any error ends a transaction (see
   [Transactions](https://tamarackdb.github.io/docs/concepts/transactions/#the-end-of-a-transaction)).
