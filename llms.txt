@@ -43,7 +43,7 @@ Building on the TamarackDB HTTP API: what every client of the protocol must do, 
 
 ## Operations
 
-Running a TamarackDB instance: installing it, configuring it, securing it, checking its health, watching it, backing it up, and maintaining it.
+Running a TamarackDB instance: installing, configuring, and securing it, checking its health, watching it, backing it up, importing a history, maintaining it.
 
 - [Install](https://tamarackdb.github.io/docs/operations/install/): Getting a TamarackDB instance running: on your own machine with Docker, in production with systemd, from the binaries, or alongside an app in Docker.
 - [Configuration](https://tamarackdb.github.io/docs/operations/configuration/): Every setting of tamarackdb-server: where settings come from, the full table of keys, environment variables, and defaults, and how to size the limits.
@@ -52,5 +52,6 @@ Running a TamarackDB instance: installing it, configuring it, securing it, check
 - [Observability](https://tamarackdb.github.io/docs/operations/observability/): GET /stats: counters of writes, conflicts, transactions, and errors since the server started, and what each one tells about the instance and its clients.
 - [Logs](https://tamarackdb.github.io/docs/operations/logs/): The access log of tamarackdb-server: one line per request, what it carries and never carries, logLevel, and the fixed level of each outcome.
 - [Backup](https://tamarackdb.github.io/docs/operations/backup/): tamarackdb-backup keeps a standing copy of an instance's events: its settings, how a run works, local or remote sources, restoring, and scheduling.
+- [Import](https://tamarackdb.github.io/docs/operations/import/): Bringing an application's history over from another event store: tamarackdb-init --import, the rules it checks, the dump format, and what to do after.
 - [Maintenance](https://tamarackdb.github.io/docs/operations/maintenance/): The maintenance left to you: a daily timer for query statistics, giving back disk space with VACUUM, a full ANALYZE, and pausing transactions.
 - [Development mode](https://tamarackdb.github.io/docs/operations/dev-mode/): What devMode turns on, POST /reset and Go's profiling endpoints, why it must stay off in production, and how to profile a request with pprof.
