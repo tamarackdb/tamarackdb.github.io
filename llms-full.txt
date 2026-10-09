@@ -277,7 +277,7 @@ sudo -u tamarackdb /usr/local/bin/tamarackdb-server --config /path/to/config.tom
 ```
 
 - `/run` is emptied at every reboot. For a lasting service, use the [systemd unit](#systemd).
-- `tamarackdb-init` creates `dataDir` and a new database, with a new store ID. It never overwrites an existing database.
+- `tamarackdb-init` creates `dataDir` and a new database. It never overwrites an existing database.
 - The server never creates a database: it refuses to start when the file is missing.
 - The server refuses to start when the database's schema version doesn't match its own. It never changes the schema.
 - At startup, the server prints its resolved configuration to stdout (never `authToken`).
@@ -525,16 +525,15 @@ tamarackdb-backup --config backup-config.toml
 
 ### How a run works
 
-- The backup file is named after the source's store ID: `<store ID>.sqlite`, in `dataDir`. After a reset of the
-  source, the next run starts a new file and leaves the old one alone.
+- The backup file is `tamarackdb-backup.sqlite`, in `dataDir`.
 - A run copies the events after the last one already in the file, page by page. Each event keeps its `sequence` and
   its `time`.
 - Each page is written as soon as it's read. A run that fails keeps the pages already written, and the next run resumes
   from there.
-- A run fails, with a non-zero exit code and the error on stderr, when a page is cut short, when a page takes more than
-  5 minutes, or when the source is reset during the run.
+- A run fails, with a non-zero exit code and the error on stderr, when a page is cut short, or when a page takes more
+  than 5 minutes.
 - A backup file holds events only. Projections are left out: they can be rebuilt from events.
-- A backup file is a regular TamarackDB database, with a store ID of its own.
+- The backup file is a regular TamarackDB database.
 
 ### Scheduling
 
@@ -565,19 +564,19 @@ WantedBy=timers.target
 
 ### Restoring
 
-Serve the backup file of the source's current store ID as the new instance. Each run logs that file's path.
+Serve the backup file as the new instance.
 
 1. Wait for the running backup to finish, and stop scheduling new ones.
 2. Copy the file into a new data directory, under the name `tamarackdb.sqlite`, owned by the server's user:
 
    ```sh
    sudo install -d -o tamarackdb -g tamarackdb -m 700 /path/to/new-data
-   sudo install -o tamarackdb -g tamarackdb -m 600 /path/to/backup/<store ID>.sqlite /path/to/new-data/tamarackdb.sqlite
+   sudo install -o tamarackdb -g tamarackdb -m 600 /path/to/backup/tamarackdb-backup.sqlite /path/to/new-data/tamarackdb.sqlite
    ```
 
 3. Start `tamarackdb-server` with `dataDir` set to that directory.
-4. Rebuild every projection before the application uses the instance. Anything that kept a position on the source
-   starts over: the backup has its own store ID.
+4. With the application stopped, restart every projector from the beginning. Start the application once the
+   projections are rebuilt.
 
 ## Import
 
@@ -773,7 +772,7 @@ curl -X POST http://127.0.0.1:8085/resume
 
 `devMode` turns on two things, for a local instance or a short troubleshooting session. Leave it off in production.
 
-- `POST /reset`: during a pause, deletes every event and projection, and draws a new store ID.
+- `POST /reset`: during a pause, deletes every event and projection.
 - `/debug/pprof/*`: Go's profiling endpoints. To profile a request, start a CPU profile, then send the request:
 
   ```sh
@@ -841,15 +840,6 @@ An event is a fact the application recorded. Once written, it never changes and 
   it. Don't order events by `time`, and don't base a decision on it: the clock can go back.
 - An event is at most `maxEventSize` bytes, counting its `type`, its tags, and its `payload`. Store large content
   elsewhere and reference it.
-
-## Store ID
-
-The store ID is a UUID that names the history a database holds. It's drawn when the database is created, and changes
-only with [`POST /reset`](https://tamarackdb.github.io/docs/development/http-api/#reset), in development mode. A backup has its own store ID.
-
-- Responses that depend on the store carry it in the `X-Tamarackdb-Store` header.
-- A Sequence Position only means something next to its store ID. A client that keeps a position keeps both.
-- If a read returns another store ID, the position no longer means anything: start over from the beginning.
 
 ## Queries
 
@@ -966,8 +956,6 @@ server on `127.0.0.1:8085`, with authentication off.
   `/resume`, `/optimize`, and `/reset`. They can get `503 WriteQueueFull` when too many wait, or `503 ShuttingDown`.
   Nothing is written then.
 - A write that joined the queue runs, even if its client leaves. Its client then handles a lost response.
-- Responses that depend on the store carry the store ID in the `X-Tamarackdb-Store` header: `QUERY /events`,
-  `GET /projections/{type}/{id}`, `POST /projections`, and `POST /pause` once in place. Transaction endpoints don't.
 
 ## Queries
 
@@ -1275,7 +1263,6 @@ curl -i http://127.0.0.1:8085/projections/user-profile/123
 HTTP/1.1 200 OK
 Content-Type: text/plain; charset=utf-8
 X-Tamarackdb-Version: 9f3c2a1e-7b4d-4c8e-a5f6-0d1e2f3a4b5c
-X-Tamarackdb-Store: 5b0c7e2a-1f4d-4a9b-8c3e-6d2f1a0b9e47
 
 {"name":"Ada Lovelace"}
 ```
@@ -1305,8 +1292,7 @@ curl -X POST http://127.0.0.1:8085/pause
 
 - While transactions are still open: `202 Accepted`, `{"openTransactions":3}`. The pause is requested: `POST /tx`
   gets `503 Paused`, and open transactions go on to their commit.
-- Once none is open: `200 OK`, `{"lastSequence":5042}`, with the store ID header. No event comes after that position
-  until `/resume`.
+- Once none is open: `200 OK`, `{"lastSequence":5042}`. No event comes after that position until `/resume`.
 - Call `/pause` again, after a short delay, until it answers `200`:
 
   ```sh
@@ -1332,8 +1318,8 @@ Refreshes the statistics SQLite plans queries with. `204 No Content`. Call it on
 
 ## Reset
 
-Empties the store, for tests: every event and projection is deleted, the next event gets sequence 1, and the store
-gets a new store ID. It exists only in development mode, and runs only during a pause:
+Empties the store, for tests: every event and projection is deleted, and the next event gets sequence 1. It exists
+only in development mode, and runs only during a pause:
 
 ```sh
 curl -X POST http://127.0.0.1:8085/pause
@@ -1378,11 +1364,6 @@ Source: https://tamarackdb.github.io/docs/development/writing-a-client/
 
 What a client of the protocol has to do, whatever its language. The calls themselves are in the
 [HTTP API](https://tamarackdb.github.io/docs/development/http-api/).
-
-## Positions
-
-- Keep the store ID and the Sequence Position together.
-- If a read returns another store ID, start over from the beginning.
 
 ## Reads
 

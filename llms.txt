@@ -28,6 +28,6 @@ Running a TamarackDB instance: installing, configuring, and securing it, backing
 Building an application on TamarackDB: the client libraries, the concepts the API builds on, the HTTP API reference, and how to write a client.
 
 - [Client Libraries](https://tamarackdb.github.io/docs/development/client-libraries/): The client libraries available for TamarackDB, with a link to each one's repository: the fastest way to build an application on the event store.
-- [Concepts](https://tamarackdb.github.io/docs/development/concepts/): The ideas the TamarackDB API builds on: events and tags, the store ID, the Append Condition, transactions, and projections, on a single page.
+- [Concepts](https://tamarackdb.github.io/docs/development/concepts/): The ideas the TamarackDB API builds on: events and tags, the Append Condition, transactions, and projections, on a single page.
 - [HTTP API](https://tamarackdb.github.io/docs/development/http-api/): The TamarackDB HTTP API reference: conventions, queries, reading events, transactions, projections, administration endpoints, and errors.
-- [Writing a Client](https://tamarackdb.github.io/docs/development/writing-a-client/): What a client of the TamarackDB protocol has to do, whatever its language: positions, reads cut short, transactions, retries, and lost responses.
+- [Writing a Client](https://tamarackdb.github.io/docs/development/writing-a-client/): What a client of the TamarackDB protocol has to do, whatever its language: reads cut short, transactions, retries, and lost responses.
