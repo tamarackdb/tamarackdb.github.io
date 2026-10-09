@@ -1,57 +1,33 @@
 # TamarackDB
 
-> DCB event store in Go, over HTTP, on SQLite
+> Event store in pure Go, compliant with the DCB specification, accessible via HTTP, using SQLite as the storage engine.
 
 The whole documentation in one Markdown file: [llms-full.txt](https://tamarackdb.github.io/llms-full.txt)
 
+## Key Features
+
+- [Key Features](https://tamarackdb.github.io/docs/key-features/): The key aspects of TamarackDB: a DCB event store with transactions and projections, served over HTTP, stored in one SQLite file, simple to run.
+
 ## Quickstart
 
-- [Quickstart](https://tamarackdb.github.io/docs/quickstart/): Run TamarackDB with Docker and try it with curl: write events in a transaction, read them back, and see a commit refused because its read is stale.
-
-## Concepts
-
-What TamarackDB is, and the ideas the rest of the documentation builds on: the mental model, transactions, events, the store ID, conditions, projections.
-
-- [Overview](https://tamarackdb.github.io/docs/concepts/overview/): What TamarackDB is: a DCB event store in Go, over HTTP, on one SQLite file. What it holds, its scope, the terms used everywhere, and the RFC 2119 key words.
-- [Mental model](https://tamarackdb.github.io/docs/concepts/mental-model/): A picture of the whole model: a board, a card cabinet, employees with notebooks, and a head clerk, to reason about concurrency without technical details.
-- [Transactions](https://tamarackdb.github.io/docs/concepts/transactions/): How a transaction works: it lives in the server's memory, pairs each read of events with a write, and writes it all at once, or nothing, at commit.
-- [Events](https://tamarackdb.github.io/docs/concepts/events/): What an event holds: type, identifiers and metadata as tags, an opaque payload, its Sequence Position, its time, and the limits on its size and tags.
-- [Store ID](https://tamarackdb.github.io/docs/concepts/store-id/): The store ID names the history a database file holds. Where it appears, when it changes, and why a position is always a store ID with a Sequence Position.
-- [Append Condition](https://tamarackdb.github.io/docs/concepts/append-condition/): How an Append Condition protects a decision: what a transaction builds from each read, its edge cases, what it doesn't cover, and DCB compliance.
-- [Projections](https://tamarackdb.github.io/docs/concepts/projections/): What a projection is, how versions keep two writes from overwriting each other, what a projection may use, and how to rebuild projections from events.
-
-## HTTP API
-
-The contract between TamarackDB and its clients: every endpoint of the HTTP API, with its request, its response, and the errors it can return.
-
-- [Conventions](https://tamarackdb.github.io/docs/http-api/conventions/): What every endpoint of the TamarackDB HTTP API has in common: bodies, waiting for a turn, the client leaving, what runs during a pause, the store ID.
-- [Query grammar](https://tamarackdb.github.io/docs/http-api/query-grammar/): The query grammar used to read events and in Append Conditions: "all", "none", query items, the matching rules, and the size limits.
-- [Reading events](https://tamarackdb.github.io/docs/http-api/read-events/): QUERY /events: reading committed events a page at a time, the NDJSON response and its trailer, cursor pagination, and resuming a page that was cut short.
-- [Transactions](https://tamarackdb.github.io/docs/http-api/transactions/): The /tx endpoints: begin a transaction, read and write events, read and write projections, commit or abandon it, with each body, response, and error.
-- [Projections](https://tamarackdb.github.io/docs/http-api/projections/): Projections outside any transaction: writing them with POST /projections, reading one with its version, and deleting them in bulk for a rebuild.
-- [Pause](https://tamarackdb.github.io/docs/http-api/pause/): POST /pause and POST /resume: stop transactions from beginning, for a fixed point in the log, a rebuild, or a deploy, and let them begin again.
-- [Optimize](https://tamarackdb.github.io/docs/http-api/optimize/): POST /optimize: refreshes the statistics SQLite plans queries with, in its turn, for an operator's daily timer. The server also runs it at every start.
-- [Reset](https://tamarackdb.github.io/docs/http-api/reset/): POST /reset, in development mode only and during a pause: empties the store and draws a new store ID, for tests, between pause and resume.
-- [Errors](https://tamarackdb.github.io/docs/http-api/errors/): The error envelope of the TamarackDB HTTP API, every error code with its status and meaning, and the causes of a 400 InvalidRequest response.
-- [Example: an online store](https://tamarackdb.github.io/docs/http-api/example/): One order in an online store as the HTTP calls an application sends: five decisions and their projections in one transaction, then an async projector.
-
-## Integration
-
-Building on the TamarackDB HTTP API: what every client of the protocol must do, from positions and cut pages to transactions and lost responses.
-
-- [Client libraries](https://tamarackdb.github.io/docs/integration/client-libraries/): What every client of the TamarackDB protocol must do: keep positions whole, spot a cut page, treat versions as opaque, handle transactions and lost responses.
+- [Quickstart](https://tamarackdb.github.io/docs/quickstart/): An overview of TamarackDB with curl: start the server with Docker, read events in a transaction, decide, write a new event, and commit it.
 
 ## Operations
 
-Running a TamarackDB instance: installing, configuring, and securing it, checking its health, watching it, backing it up, importing a history, maintaining it.
+Running a TamarackDB instance: installing, configuring, and securing it, backing it up, importing a dump, monitoring it, and maintaining it.
 
 - [Install](https://tamarackdb.github.io/docs/operations/install/): Getting a TamarackDB instance running: on your own machine with Docker, in production with systemd, from the binaries, or alongside an app in Docker.
 - [Configuration](https://tamarackdb.github.io/docs/operations/configuration/): Every setting of tamarackdb-server: where settings come from, the full table of keys, environment variables, and defaults, and how to size the limits.
 - [Security](https://tamarackdb.github.io/docs/operations/security/): Who can reach a TamarackDB instance and who can read its data: the unix socket, a reverse proxy for other hosts, the Bearer token, and file permissions.
-- [Health check](https://tamarackdb.github.io/docs/operations/health-check/): GET /health: how a process supervisor or a load balancer checks that a TamarackDB instance responds and that its SQLite database can be reached.
-- [Observability](https://tamarackdb.github.io/docs/operations/observability/): GET /stats: counters of writes, conflicts, transactions, and errors since the server started, and what each one tells about the instance and its clients.
-- [Logs](https://tamarackdb.github.io/docs/operations/logs/): The access log of tamarackdb-server: one line per request, what it carries and never carries, logLevel, and the fixed level of each outcome.
-- [Backup](https://tamarackdb.github.io/docs/operations/backup/): tamarackdb-backup keeps a standing copy of an instance's events: its settings, how a run works, local or remote sources, restoring, and scheduling.
-- [Import](https://tamarackdb.github.io/docs/operations/import/): Bringing an application's history over from another event store: tamarackdb-init --import, the rules it checks, the dump format, and what to do after.
-- [Maintenance](https://tamarackdb.github.io/docs/operations/maintenance/): The maintenance left to you: a daily timer for query statistics, giving back disk space with VACUUM, a full ANALYZE, and pausing transactions.
-- [Development mode](https://tamarackdb.github.io/docs/operations/dev-mode/): What devMode turns on, POST /reset and Go's profiling endpoints, why it must stay off in production, and how to profile a request with pprof.
+- [Backup and Import](https://tamarackdb.github.io/docs/operations/backup/): Backing up an instance's events with tamarackdb-backup, restoring a backup, and importing the history of another event store with tamarackdb-init.
+- [Monitoring](https://tamarackdb.github.io/docs/operations/monitoring/): Watching a TamarackDB instance: GET /health for a supervisor or a load balancer, the GET /stats counters and what they mean, and the access log.
+- [Maintenance](https://tamarackdb.github.io/docs/operations/maintenance/): Maintaining a TamarackDB instance: a daily timer for query statistics, VACUUM and ANALYZE, pausing transactions, and the development mode.
+
+## Development
+
+Building an application on TamarackDB: the client libraries, the concepts the API builds on, the HTTP API reference, and how to write a client.
+
+- [Client Libraries](https://tamarackdb.github.io/docs/development/client-libraries/): The client libraries available for TamarackDB, with a link to each one's repository: the fastest way to build an application on the event store.
+- [Concepts](https://tamarackdb.github.io/docs/development/concepts/): The ideas the TamarackDB API builds on: events and tags, the store ID, the Append Condition, transactions, and projections, on a single page.
+- [HTTP API](https://tamarackdb.github.io/docs/development/http-api/): The TamarackDB HTTP API reference: conventions, queries, reading events, transactions, projections, administration endpoints, and errors.
+- [Writing a Client](https://tamarackdb.github.io/docs/development/writing-a-client/): What a client of the TamarackDB protocol has to do, whatever its language: positions, reads cut short, transactions, retries, and lost responses.
