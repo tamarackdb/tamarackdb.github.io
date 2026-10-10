@@ -378,6 +378,7 @@ tamarackdb-backup --default-config >> config.toml
 | `maxQueuedWrites` | `TAMARACKDB_MAX_QUEUED_WRITES` | `100` | The most writes waiting for their turn at once |
 | `readPoolSize` | `TAMARACKDB_READ_POOL_SIZE` | `8` | How many reads run at once |
 | `txIdleTimeout` | `TAMARACKDB_TX_IDLE_TIMEOUT` | `60` | How long, in seconds, a transaction lives without a call |
+| `maxOpenTx` | `TAMARACKDB_MAX_OPEN_TX` | `1000` | The most transactions open at once |
 
 ## Listening
 
@@ -395,6 +396,8 @@ tamarackdb-backup --default-config >> config.toml
   start otherwise.
 - `txIdleTimeout` only ends transactions the application forgot. A transaction that keeps making calls lives as long
   as it needs.
+- Past `maxOpenTx`, `POST /tx` gets `503 TooManyTransactions`. The open transactions go on. A commit still writing
+  counts as open.
 
 ## Write queue
 
@@ -661,7 +664,8 @@ change from one version to the next.
     "expired": 2,
     "designErrors": 0,
     "paused": 0,
-    "busy": 0
+    "busy": 0,
+    "tooMany": 0
   },
   "pause": {
     "state": "normal",
@@ -681,6 +685,8 @@ What to watch:
   [Configuration](https://tamarackdb.github.io/docs/operations/configuration/#write-queue)).
 - **`transactions.expired`** rising: the application begins transactions and forgets them.
 - **`transactions.designErrors`** or **`transactions.busy`** above zero: the client library has a bug.
+- **`transactions.tooMany`** above zero: `maxOpenTx` is too low, or the application begins transactions and never
+  ends them (see `expired`).
 - **`pause.state`** stuck at `pauseRequested`: transactions are still open (`openTransactions`), or whoever asked for
   the pause stopped calling `POST /pause`.
 - **`lastOptimizeAt`** more than a day old: the daily `POST /optimize` doesn't run (see
@@ -700,7 +706,7 @@ tamarackdb-server: [WARNING] POST /projections 503 27B 0.07ms
   request.
 - `debug`: a success, or an expected refusal such as a conflict.
 - `info`: a client's mistake, such as a malformed request or a bad token, or a pause or resume.
-- `warning`: the write queue is full.
+- `warning`: the write queue is full, or `maxOpenTx` transactions are open.
 - `error`: a failure on the server.
 
 ---
@@ -1056,7 +1062,8 @@ curl -X POST http://127.0.0.1:8085/tx
 {"txId":"7d1e4b2a-3c5f-4e6d-9a8b-0c1d2e3f4a5b"}
 ```
 
-During a pause, `POST /tx` gets `503 Paused`.
+During a pause, `POST /tx` gets `503 Paused`. While `maxOpenTx` transactions are open, it gets
+`503 TooManyTransactions`: try again later.
 
 ### Read events
 
@@ -1354,6 +1361,7 @@ behind a limit.
 | `413` | `PayloadTooLarge` | An event, a projection, or a body over its size limit |
 | `500` | `InternalError` | A failure on the server |
 | `503` | `Paused` | `POST /tx` during a pause |
+| `503` | `TooManyTransactions` | `POST /tx` while `maxOpenTx` transactions are open |
 | `503` | `WriteQueueFull` | A write while too many already wait. Nothing was written |
 | `503` | `ShuttingDown` | A write while the server shuts down. Nothing was written |
 | `503` | `Unavailable` | `GET /health` when the database can't be reached |
@@ -1380,7 +1388,8 @@ What a client of the protocol has to do, whatever its language. The calls themse
 - Read a projection in the transaction before you replace or delete it. A `create` needs no read.
 - Send one call at a time on a transaction.
 - After `409 ConcurrencyException` or `404 TransactionNotFound`, run the whole command again, in a new transaction.
-- `POST /tx` can get `503 Paused`. What to do with the command is the application's choice.
+- `POST /tx` can get `503 Paused`, or `503 TooManyTransactions`. What to do with the command is the application's
+  choice.
 - Abandon a transaction you no longer need, for example in the error handler around a command, and ignore the
   response.
 - Give each event of a write the `time` the write returned: it's the `time` the event keeps once committed.
