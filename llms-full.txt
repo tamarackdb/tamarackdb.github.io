@@ -167,7 +167,7 @@ docker run -d --rm --name tamarackdb -p 127.0.0.1:8085:8085 \
 ```
 
 - The API is at `http://127.0.0.1:8085`, reachable from your machine only.
-- `TAMARACKDB_DEV_MODE=true` turns on `POST /reset`, to start each test run from an empty store (see
+- `TAMARACKDB_DEV_MODE=true` turns on `DELETE /events`, to start each test run from an empty store (see
   [Development mode](https://tamarackdb.github.io/docs/operations/maintenance/#development-mode)).
 - `TAMARACKDB_LOG_LEVEL=debug` logs every request. Read them with `docker logs -f tamarackdb`.
 - `--rm` deletes the data when the container stops. Mount a volume on `/data` to keep it (see [Docker](#docker)).
@@ -365,7 +365,7 @@ tamarackdb-backup --default-config >> config.toml
 | `authToken` | `TAMARACKDB_AUTH_TOKEN` | none | The Bearer token |
 | `dataDir` | `TAMARACKDB_DATA_DIR` | `data` | The directory holding the database file, `tamarackdb.sqlite` |
 | `logLevel` | `TAMARACKDB_LOG_LEVEL` | `warning` | The lowest level logged: `debug`, `info`, `warning`, or `error` |
-| `devMode` | `TAMARACKDB_DEV_MODE` | `false` | Turns on `POST /reset` and the profiling endpoints |
+| `devMode` | `TAMARACKDB_DEV_MODE` | `false` | Turns on `DELETE /events` and the profiling endpoints |
 | `defaultEventsPerPage` | `TAMARACKDB_DEFAULT_EVENTS_PER_PAGE` | `1000` | The `limit` of a `QUERY /events` that leaves it out |
 | `maxEventsPerPage` | `TAMARACKDB_MAX_EVENTS_PER_PAGE` | `10000` | The highest `limit` a `QUERY /events` may ask for |
 | `maxEventSize` | `TAMARACKDB_MAX_EVENT_SIZE` | `65536` (64 KiB) | The largest event, in bytes |
@@ -402,7 +402,7 @@ tamarackdb-backup --default-config >> config.toml
 ## Write queue
 
 Writes are served one at a time, in the order they arrive: transaction commits, `POST /projections`, bulk deletes of
-projections, `POST /pause`, `POST /resume`, `POST /optimize`, and `POST /reset`. Reads never wait.
+events and projections, `POST /pause`, `POST /resume`, and `POST /optimize`. Reads never wait.
 
 - A write usually holds its turn a few milliseconds, so the queue stays short.
 - A large write, such as a projection rebuild in one request, makes the others wait that long.
@@ -481,7 +481,7 @@ Anyone who can read the database file reads every event and projection, whatever
 - An existing directory or file keeps its permissions: the server never changes them. Give a directory you create
   yourself `0700`.
 - A `config.toml` that holds `authToken` must be readable by the server's user only: `chmod 600 config.toml`.
-- `devMode` stays off in production: it exposes `POST /reset`, which deletes every event.
+- `devMode` stays off in production: it exposes `DELETE /events`, which deletes every event.
 
 ---
 
@@ -705,7 +705,7 @@ tamarackdb-server: [WARNING] POST /projections 503 27B 0.07ms
 - `logLevel` sets the lowest level written. The default, `warning`, shows only problems. Use `debug` to see every
   request.
 - `debug`: a success, or an expected refusal such as a conflict.
-- `info`: a client's mistake, such as a malformed request or a bad token, or a pause or resume.
+- `info`: a client's mistake, such as a malformed request or a bad token, or a pause, a resume, an optimize, or a bulk delete.
 - `warning`: the write queue is full, or `maxOpenTx` transactions are open.
 - `error`: a failure on the server.
 
@@ -778,14 +778,14 @@ curl -X POST http://127.0.0.1:8085/resume
 
 `devMode` turns on two things, for a local instance or a short troubleshooting session. Leave it off in production.
 
-- `POST /reset`: during a pause, deletes every event and projection.
+- `DELETE /events`: deletes every event.
 - `/debug/pprof/*`: Go's profiling endpoints. To profile a request, start a CPU profile, then send the request:
 
   ```sh
   go tool pprof -http=:0 "http://127.0.0.1:8085/debug/pprof/profile?seconds=30"
   ```
 
-With `devMode` off, both answer `404`.
+With `devMode` off, `DELETE /events` answers `405`, and `/debug/pprof/*` answers `404`.
 
 ---
 
@@ -950,7 +950,7 @@ server on `127.0.0.1:8085`, with authentication off.
 | [`DELETE /projections/{type}`, `DELETE /projections`](#bulk-delete) | Delete every projection of a type, or every projection |
 | [`POST /pause`, `POST /resume`](#pause-and-resume) | Stop transactions from beginning, and let them begin again |
 | [`POST /optimize`](#optimize) | Refresh SQLite's query statistics |
-| [`POST /reset`](#reset) | Empty the store (development mode only) |
+| [`DELETE /events`](#delete-events) | Delete every event (development mode only) |
 | `GET /health`, `GET /stats` | See [Monitoring](https://tamarackdb.github.io/docs/operations/monitoring/) |
 
 ## Conventions
@@ -960,7 +960,7 @@ server on `127.0.0.1:8085`, with authentication off.
 - A request body is JSON, decoded strictly: an unknown key, at any level, gets `400`.
 - A body is at most `maxRequestBodySize` bytes, or gets `413`.
 - Writes are served one at a time, in the order they arrive: commits, `POST /projections`, bulk deletes, `/pause`,
-  `/resume`, `/optimize`, and `/reset`. They can get `503 WriteQueueFull` when too many wait, or `503 ShuttingDown`.
+  `/resume`, and `/optimize`. They can get `503 WriteQueueFull` when too many wait, or `503 ShuttingDown`.
   Nothing is written then.
 - A write that joined the queue runs, even if its client leaves. Its client then handles a lost response.
 
@@ -1325,18 +1325,22 @@ curl -X POST http://127.0.0.1:8085/optimize
 Refreshes the statistics SQLite plans queries with. `204 No Content`. Call it once a day (see
 [Maintenance](https://tamarackdb.github.io/docs/operations/maintenance/#query-statistics)).
 
-## Reset
+## Delete events
 
-Empties the store, for tests: every event and projection is deleted, and the next event gets sequence 1. It exists
-only in development mode, and runs only during a pause:
+Deletes every event, for tests. It exists only in development mode. To empty the store between two tests, delete the
+events, then the projections:
 
 ```sh
-curl -X POST http://127.0.0.1:8085/pause
-curl -X POST http://127.0.0.1:8085/reset
-curl -X POST http://127.0.0.1:8085/resume
+curl -X DELETE http://127.0.0.1:8085/events
+curl -X DELETE http://127.0.0.1:8085/projections
 ```
 
-Outside a pause in place, it gets `409 NotPaused`.
+- `204 No Content`.
+- Projections stay. Delete them with [`DELETE /projections`](#bulk-delete).
+- Sequence Positions go on: the next event doesn't get sequence 1.
+- It doesn't wait for open transactions, and runs during a pause too. An open transaction goes on, and its commit
+  writes into the emptied log.
+- With development mode off, it gets `405`.
 
 ## Errors
 
@@ -1357,7 +1361,6 @@ behind a limit.
 | `404` | `TransactionNotFound` | A transaction unknown, expired, or over |
 | `409` | `ConcurrencyException` | A commit or `POST /projections` conflict. Nothing was written |
 | `409` | `TransactionBusy` | A call while another one runs on the same transaction. The transaction goes on |
-| `409` | `NotPaused` | `POST /reset` outside a pause |
 | `413` | `PayloadTooLarge` | An event, a projection, or a body over its size limit |
 | `500` | `InternalError` | A failure on the server |
 | `503` | `Paused` | `POST /tx` during a pause |
@@ -1406,7 +1409,7 @@ What a client of the protocol has to do, whatever its language. The calls themse
 
 ## Testing
 
-- In development mode, empty the store between tests with `POST /pause`, `POST /reset`, then `POST /resume`.
+- In development mode, empty the store between tests with `DELETE /events`, then `DELETE /projections`.
 - [`testdata/query-cases.json`](https://github.com/tamarackdb/tamarackdb/blob/main/testdata/query-cases.json) lists
   queries, events, and whether each query selects each event.
 
