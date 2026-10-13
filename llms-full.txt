@@ -36,6 +36,8 @@ TamarackDB is an open source event store written in Go. It follows the
   instance. See [Backup and Import](https://tamarackdb.github.io/docs/operations/backup/).
 - **Import.** `tamarackdb-init --import` builds a new database from a dump of another event store's history. Each
   event keeps its sequence and its time. See [Backup and Import](https://tamarackdb.github.io/docs/operations/backup/).
+- **Upgrades.** `tamarackdb-migrate` brings a database to a new major version, in one transaction. See
+  [Upgrade](https://tamarackdb.github.io/docs/operations/upgrade/).
 - **Security.** The server listens on a unix socket by default. A Bearer token is optional, and a reverse proxy adds
   TLS. See [Security](https://tamarackdb.github.io/docs/operations/security/).
 - **Monitoring.** `GET /health` for a supervisor or a load balancer, `GET /stats` for counters, and an access log. See
@@ -176,13 +178,14 @@ docker run -d --rm --name tamarackdb -p 127.0.0.1:8085:8085 \
 
 ## Binaries
 
-Each release publishes three binaries for Linux, on amd64 and arm64:
+Each release publishes four binaries for Linux, on amd64 and arm64:
 
 | Binary | What it does |
 |---|---|
 | `tamarackdb-server` | The HTTP server |
 | `tamarackdb-init` | Creates a new database, empty or from a dump of events. The server needs one to start |
 | `tamarackdb-backup` | Copies new events from an instance into a backup file |
+| `tamarackdb-migrate` | Brings a database to a new major version (see [Upgrade](https://tamarackdb.github.io/docs/operations/upgrade/)) |
 
 Download a release and install its binaries (see the
 [releases](https://github.com/tamarackdb/tamarackdb/releases) for the latest version):
@@ -591,8 +594,9 @@ Serve the backup file as the new instance.
    sudo install -o tamarackdb -g tamarackdb -m 600 /path/to/backup/tamarackdb-backup.sqlite /path/to/new-data/tamarackdb.sqlite
    ```
 
-3. Start `tamarackdb-server` with `dataDir` set to that directory.
-4. With the application stopped, restart every projector from the beginning. Start the application once the
+3. If the backup was made with an older major version, migrate it (see [Upgrade](https://tamarackdb.github.io/docs/operations/upgrade/#restoring-a-backup)).
+4. Start `tamarackdb-server` with `dataDir` set to that directory.
+5. With the application stopped, restart every projector from the beginning. Start the application once the
    projections are rebuilt.
 
 ## Import
@@ -801,6 +805,63 @@ curl -X POST http://127.0.0.1:8085/resume
   ```
 
 With `devMode` off, `DELETE /events` answers `405`, and `/debug/pprof/*` answers `404`.
+
+---
+
+# Upgrade
+
+Source: https://tamarackdb.github.io/docs/operations/upgrade/
+
+Moving an instance to a new release. Only a new major version changes the database file, and `tamarackdb-migrate`
+brings the file to it.
+
+## Within a major version
+
+1. Stop the server.
+2. Replace the binaries (see [Install](https://tamarackdb.github.io/docs/operations/install/#binaries)).
+3. Start the server.
+
+## To a new major version
+
+1. Stop the server, and stop scheduling `tamarackdb-backup`.
+2. Copy the database file, as a backup. `tamarackdb-migrate` makes none.
+3. Replace the binaries.
+4. Migrate the database file, as the server's user:
+
+   ```sh
+   sudo -u tamarackdb /usr/local/bin/tamarackdb-migrate --data-dir /var/lib/tamarackdb
+   ```
+
+   ```text
+   tamarackdb-migrate: migrated /var/lib/tamarackdb/tamarackdb.sqlite from schema version 1 to 2
+   ```
+
+5. Start the server. When the release notes say the migration deletes the projections, restart every projector from
+   the beginning, with the application stopped.
+6. Point `tamarackdb-backup` to a new, empty `dataDir`, and schedule it again.
+
+- The schema version of a database is the major version of TamarackDB.
+- The server refuses to start on a database at another version.
+- `tamarackdb-migrate` refuses to run while the server, or any other TamarackDB process, uses the file.
+- Each `tamarackdb-migrate` migrates from the previous major version only. To skip major versions, run each
+  intermediate `tamarackdb-migrate`, in order.
+- A database already at the new version is left as it is.
+- The migration is all or nothing: when it fails, the file stays at the previous version.
+- There is no way back to an older version, other than the copy made before the migration.
+
+## Docker
+
+Stop the container, then run `tamarackdb-migrate` from the new image, on the same volume:
+
+```sh
+docker run --rm -v tamarackdb-data:/data --entrypoint ./tamarackdb-migrate \
+  ghcr.io/tamarackdb/tamarackdb:latest --data-dir /data
+```
+
+## Restoring a backup
+
+- To restore a backup made with an older major version, copy it into the new data directory (see
+  [Backup and Import](https://tamarackdb.github.io/docs/operations/backup/#restoring)), then run `tamarackdb-migrate` on that directory.
 
 ---
 

@@ -14,7 +14,7 @@ The whole documentation in one Markdown file: [llms-full.txt](https://tamarackdb
 
 ## Operations
 
-Running a TamarackDB instance: installing, configuring, and securing it, backing it up, importing a dump, monitoring it, and maintaining it.
+Running a TamarackDB instance: installing, configuring, and securing it, backing it up, importing a dump, monitoring, maintaining, and upgrading it.
 
 - [Install](https://tamarackdb.github.io/docs/operations/install/): Getting a TamarackDB instance running: on your own machine with Docker, in production with systemd, from the binaries, or alongside an app in Docker.
 - [Configuration](https://tamarackdb.github.io/docs/operations/configuration/): Every setting of tamarackdb-server: where settings come from, the full table of keys, environment variables, and defaults, and how to size the limits.
@@ -22,6 +22,7 @@ Running a TamarackDB instance: installing, configuring, and securing it, backing
 - [Backup and Import](https://tamarackdb.github.io/docs/operations/backup/): Backing up an instance's events with tamarackdb-backup, restoring a backup, and importing the history of another event store with tamarackdb-init.
 - [Monitoring](https://tamarackdb.github.io/docs/operations/monitoring/): Watching a TamarackDB instance: GET /health for a supervisor or a load balancer, the GET /stats counters and what they mean, and the access log.
 - [Maintenance](https://tamarackdb.github.io/docs/operations/maintenance/): Maintaining a TamarackDB instance: a daily timer for query statistics, VACUUM and ANALYZE, pausing transactions, and the development mode.
+- [Upgrade](https://tamarackdb.github.io/docs/operations/upgrade/): Moving a TamarackDB instance to a new release: replacing the binaries, migrating the database to a new major version with tamarackdb-migrate.
 
 ## Development
 
