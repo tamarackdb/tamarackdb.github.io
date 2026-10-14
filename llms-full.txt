@@ -215,9 +215,9 @@ Check each point before an instance holds real data:
 2. Keep `dataDir` readable by that user only (`0700`).
 3. Run the server on the application's host, on its unix socket (see
    [Security](https://tamarackdb.github.io/docs/operations/security/#unix-socket)).
-4. From another host, go through a reverse proxy for TLS, and turn `enableAuth` on (see
+4. From another host, go through a reverse proxy for TLS, and set `authTokenFile` (see
    [Security](https://tamarackdb.github.io/docs/operations/security/#another-host)).
-5. Make a `config.toml` that holds `authToken` readable by the server's user only (`chmod 600`).
+5. Make the token file readable by the server's user only (`chmod 600`).
 6. Leave `devMode` off.
 7. Size `maxQueuedWrites` (see [Configuration](https://tamarackdb.github.io/docs/operations/configuration/#write-queue)).
 8. Watch `/health` and `/stats` (see [Monitoring](https://tamarackdb.github.io/docs/operations/monitoring/)).
@@ -262,6 +262,16 @@ socketMode = "0660"
 dataDir = "/var/lib/tamarackdb"
 ```
 
+To turn authentication on, let systemd hand the token file to the server. Add to `[Service]`:
+
+```ini
+LoadCredential=token:/etc/tamarackdb/token
+Environment=TAMARACKDB_AUTH_TOKEN_FILE=%d/token
+```
+
+- `/etc/tamarackdb/token` can then be owned by root, with `chmod 600`.
+- systemd copies it into a directory only the service can read, and `%d` names that directory.
+
 Create the user and the database, then start the service:
 
 ```sh
@@ -289,7 +299,7 @@ sudo -u tamarackdb /usr/local/bin/tamarackdb-server --config /path/to/config.tom
 - `tamarackdb-init` creates `dataDir` and a new database. It never overwrites an existing database.
 - The server never creates a database: it refuses to start when the file is missing.
 - The server refuses to start when the database's schema version doesn't match its own. It never changes the schema.
-- At startup, the server prints its resolved configuration to stdout (never `authToken`).
+- At startup, the server prints its resolved configuration to stdout (never the token).
 
 ## Docker
 
@@ -305,11 +315,21 @@ docker run -d -p 127.0.0.1:8085:8085 -v tamarackdb-data:/data \
 - The image is set up with `TAMARACKDB_*` environment variables only (see
   [Configuration](https://tamarackdb.github.io/docs/operations/configuration/)).
 - It listens over TCP on port `8085`, and keeps the database in `/data`.
-- The server refuses to start until it's given `TAMARACKDB_ENABLE_AUTH=true` and a token, or
-  `TAMARACKDB_ALLOW_NO_AUTH=true`. It can't see whether its port is private.
+- The server refuses to start until it's given `TAMARACKDB_AUTH_TOKEN_FILE` or `TAMARACKDB_ALLOW_NO_AUTH=true`. It
+  can't see whether its port is private.
 - Without a token, publish the port on `127.0.0.1` only. A plain `-p 8085:8085` opens the API to anyone who can reach
-  the host. To expose it, turn `enableAuth` on and put a reverse proxy in front for TLS (see
+  the host. To expose it, set a token and put a reverse proxy in front for TLS (see
   [Security](https://tamarackdb.github.io/docs/operations/security/#another-host)).
+- To set a token, mount its file read-only and name it in `TAMARACKDB_AUTH_TOKEN_FILE`. The file must be readable by
+  UID `10001`:
+
+  ```sh
+  sudo chown 10001 /etc/tamarackdb/token
+  docker run -d -p 127.0.0.1:8085:8085 -v tamarackdb-data:/data \
+    -v /etc/tamarackdb/token:/run/secrets/tamarackdb-token:ro \
+    -e TAMARACKDB_AUTH_TOKEN_FILE=/run/secrets/tamarackdb-token \
+    ghcr.io/tamarackdb/tamarackdb:latest
+  ```
 - The server runs as UID and GID `10001`. To mount a host directory instead of a named volume, give it to that user
   first: `sudo install -d -o 10001 -g 10001 -m 700 /srv/tamarackdb`.
 - When `/data` holds no database, the image creates one and logs `tamarackdb-init: created /data/tamarackdb.sqlite`.
@@ -337,8 +357,30 @@ volumes:
   tamarackdb-data:
 ```
 
-Every container on that network can reach the API. If some of them aren't trusted, turn `enableAuth` on instead of
-`TAMARACKDB_ALLOW_NO_AUTH`.
+Every container on that network can reach the API. If some of them aren't trusted, give the server a token instead of
+`TAMARACKDB_ALLOW_NO_AUTH`, as a Compose secret:
+
+```yaml
+services:
+  tamarackdb:
+    image: ghcr.io/tamarackdb/tamarackdb:latest
+    environment:
+      TAMARACKDB_AUTH_TOKEN_FILE: /run/secrets/tamarackdb-token
+    secrets:
+      - tamarackdb-token
+    volumes:
+      - tamarackdb-data:/data
+
+secrets:
+  tamarackdb-token:
+    file: ./tamarackdb-token
+
+volumes:
+  tamarackdb-data:
+```
+
+- Compose mounts `./tamarackdb-token` with its permissions on the host: it must be readable by UID `10001`.
+- The application gets the token by its own means, a secret of its own for example.
 
 ---
 
@@ -377,9 +419,8 @@ tamarackdb-backup --default-config >> config.toml
 | `socketMode` | `TAMARACKDB_SOCKET_MODE` | `"0600"` | The socket's permissions, as an octal string |
 | `bindAddress` | `TAMARACKDB_BIND_ADDRESS` | `127.0.0.1` | The address to listen on over TCP |
 | `port` | `TAMARACKDB_PORT` | `8085` | The port to listen on over TCP |
-| `enableAuth` | `TAMARACKDB_ENABLE_AUTH` | `false` | Whether every request needs the Bearer token |
-| `authToken` | `TAMARACKDB_AUTH_TOKEN` | none | The Bearer token |
-| `allowNoAuth` | `TAMARACKDB_ALLOW_NO_AUTH` | `false` | Whether the server may listen over TCP on an address other than loopback with `enableAuth` off. Ignored on the unix socket |
+| `authTokenFile` | `TAMARACKDB_AUTH_TOKEN_FILE` | none | The file holding the Bearer token. Setting it turns authentication on (see [Security](https://tamarackdb.github.io/docs/operations/security/#bearer-token)) |
+| `allowNoAuth` | `TAMARACKDB_ALLOW_NO_AUTH` | `false` | Whether the server may listen over TCP on an address other than loopback without `authTokenFile`. Ignored on the unix socket |
 | `dataDir` | `TAMARACKDB_DATA_DIR` | `data` | The directory holding the database file, `tamarackdb.sqlite` |
 | `logLevel` | `TAMARACKDB_LOG_LEVEL` | `warning` | The lowest level logged: `debug`, `info`, `warning`, or `error` |
 | `devMode` | `TAMARACKDB_DEV_MODE` | `false` | Turns on `DELETE /events` and the profiling endpoints |
@@ -480,28 +521,38 @@ server {
 
 - Set nginx's `client_max_body_size` to the server's `maxRequestBodySize`. nginx refuses bodies over 1 MiB by default.
 - The proxy's user must be allowed by `socketMode`, like the application's.
-- Turn `enableAuth` on: the proxy opens the API to the network. The proxy passes the `Authorization` header through.
+- Set `authTokenFile`: the proxy opens the API to the network. The proxy passes the `Authorization` header through.
 - In Docker, the server listens over TCP: keep its port private (see [Install](https://tamarackdb.github.io/docs/operations/install/#docker)).
 
 ## Bearer token
 
-- With `enableAuth` on, every route needs `Authorization: Bearer <token>`, `/health` and `/stats` included.
+Setting `authTokenFile` turns authentication on. The file holds the token alone, in plain text. To create one:
+
+```sh
+sudo install -o tamarackdb -g tamarackdb -m 600 /dev/null /etc/tamarackdb/token
+openssl rand -hex 32 | sudo tee /etc/tamarackdb/token > /dev/null
+```
+
+- Every route then needs `Authorization: Bearer <token>`, `/health` and `/stats` included.
 - A request without the right token gets `401 Unauthorized`.
-- There is one token, `authToken`. Changing it means changing the configuration and restarting the server.
-- With `enableAuth` off, the default, no request is checked.
-- The server refuses to start with `enableAuth` off when it listens over TCP on an address other than loopback, such
+- The server removes spaces and line breaks at the start and end of the file.
+- The server refuses to start when the file is missing, unreadable, or empty.
+- There is one token. The server reads it at startup: changing it means restarting the server.
+- Without `authTokenFile`, the default, no request is checked.
+- The server refuses to start without `authTokenFile` when it listens over TCP on an address other than loopback, such
   as `0.0.0.0`. Set `allowNoAuth` to `true` to start it anyway, when something else keeps the port private. `devMode`
   implies it.
 - On the unix socket, `allowNoAuth` has no effect: `socketMode` decides who can connect.
 
 ## Files
 
-Anyone who can read the database file reads every event and projection, whatever `enableAuth` and `socketMode` say.
+Anyone who can read the database file reads every event and projection, whatever the token and `socketMode` say.
 
 - `tamarackdb-init` and `tamarackdb-backup` create a data directory as `0700` and a database file as `0600`.
 - An existing directory or file keeps its permissions: the server never changes them. Give a directory you create
   yourself `0700`.
-- A `config.toml` that holds `authToken` must be readable by the server's user only: `chmod 600 config.toml`.
+- The token file must be readable by the server's user only: `chmod 600`. With systemd's `LoadCredential=`, it can be
+  owned by root instead (see [Install](https://tamarackdb.github.io/docs/operations/install/#systemd)).
 - `devMode` stays off in production: it exposes `DELETE /events`, which deletes every event.
 
 ---
@@ -533,19 +584,21 @@ tamarackdb-backup --config backup-config.toml
 |---|---|---|---|
 | `sourceUrl` | `TAMARACKDB_BACKUP_SOURCE_URL` | none | The `http://` or `https://` address of the instance to copy |
 | `sourceSocket` | `TAMARACKDB_BACKUP_SOURCE_SOCKET` | none | The unix socket of an instance on the same host |
-| `sourceToken` | `TAMARACKDB_BACKUP_SOURCE_TOKEN` | none | The Bearer token of the source, when it has `enableAuth` on |
+| `sourceTokenFile` | `TAMARACKDB_BACKUP_SOURCE_TOKEN_FILE` | none | The file holding the source's Bearer token, when the source has `authTokenFile` set |
 | `dataDir` | `TAMARACKDB_BACKUP_DATA_DIR` | `backup` | The directory the backup files go to. Never the server's own `dataDir` |
 | `pageLimit` | `TAMARACKDB_BACKUP_PAGE_LIMIT` | `1000` | Events read per page. At most the source's `maxEventsPerPage` |
 
 - Set exactly one of `sourceUrl` and `sourceSocket`.
-- A file that holds `sourceToken` must be readable by the backup's user only (`chmod 600`).
+- The token file holds the token alone, like the server's (see [Security](https://tamarackdb.github.io/docs/operations/security/#bearer-token)). It
+  must be readable by the backup's user only (`chmod 600`).
 
 ### The source
 
 - **On the same host:** set `sourceSocket` to the server's socket. The backup's user must be allowed by the server's
   `socketMode` (see [Security](https://tamarackdb.github.io/docs/operations/security/#unix-socket)).
 - **On another host:** set `sourceUrl` to the `https://` address of a reverse proxy in front of the server, with
-  `enableAuth` on and the token in `sourceToken` (see [Security](https://tamarackdb.github.io/docs/operations/security/#another-host)).
+  `authTokenFile` set, and the same token in `sourceTokenFile` (see
+  [Security](https://tamarackdb.github.io/docs/operations/security/#another-host)).
 
 ### How a run works
 
@@ -647,8 +700,8 @@ fields:
 
 Source: https://tamarackdb.github.io/docs/operations/monitoring/
 
-Watching an instance: whether it's up, what it does, and what goes wrong. With `enableAuth` on, `/health` and `/stats`
-need the token like every other route.
+Watching an instance: whether it's up, what it does, and what goes wrong. With `authTokenFile` set, `/health` and
+`/stats` need the token like every other route.
 
 ## Health check
 
@@ -768,7 +821,7 @@ Persistent=true
 WantedBy=timers.target
 ```
 
-- With `enableAuth` on, add `-H "Authorization: Bearer <token>"`.
+- With `authTokenFile` set, add `-H "Authorization: Bearer <token>"`.
 - `lastOptimizeAt` in `GET /stats` shows when it last ran.
 - After a large import, run a full `ANALYZE` once:
   `sudo -u tamarackdb sqlite3 /path/to/data/tamarackdb.sqlite 'ANALYZE;'`.
@@ -1039,7 +1092,7 @@ server on `127.0.0.1:8085`, with authentication off.
 ## Conventions
 
 - By default the server listens on a unix socket. With curl: `curl --unix-socket <path> http://localhost/...`.
-- With `enableAuth` on, every request carries `Authorization: Bearer <token>`, or gets `401`.
+- With `authTokenFile` set, every request carries `Authorization: Bearer <token>`, or gets `401`.
 - A request body is JSON, decoded strictly: an unknown key, at any level, gets `400`.
 - A body is at most `maxRequestBodySize` bytes, or gets `413`.
 - Writes are served one at a time, in the order they arrive: commits, `POST /projections`, bulk deletes, `/pause`,
