@@ -452,6 +452,8 @@ tamarackdb-backup --default-config >> config.toml
   application's data, and use the same ones in production. Every error from a limit names the setting to raise.
 - Every limit must be positive, and `defaultEventsPerPage` can't exceed `maxEventsPerPage`. The server refuses to
   start otherwise.
+- A client has one minute to send a request, its body included. Past that, the server closes the connection without
+  an answer. This limit is fixed.
 - `txIdleTimeout` only ends transactions the application forgot. A transaction that keeps making calls lives as long
   as it needs.
 - Past `maxOpenTx`, `POST /tx` gets `503 TooManyTransactions`. The open transactions go on. A commit still writing
@@ -1032,12 +1034,14 @@ everything at commit, or nothing.
 4. **Commit.** The server checks every condition and every projection written, then writes everything at once.
 
 - A read of events opens a condition. The next call must be the write of events that closes it, even with an empty
-  list. The decision to write nothing is checked at commit too.
+  list. If the transaction writes anything else, the decision to write nothing is checked at commit too.
 - A decision that rests on no event reads `"none"` first.
 - A projection only read is not checked at commit: a decision that rests on it is not protected.
 - To read events without making a decision, use `QUERY /events`, outside the transaction.
 - A read in a transaction sees committed events, then the transaction's own pending events. A pending event has no
   `sequence` until the commit.
+- A decision can read only the latest events, with `backwards` and a `limit`. Its condition still covers every event
+  that matches the query.
 - After a `409`, run the whole command again, in a new transaction.
 - A transaction ends at its commit, when it's abandoned, at its first error, after `txIdleTimeout` without a call, or
   when the server stops. Then every call on it gets `404 TransactionNotFound`.
@@ -1156,6 +1160,7 @@ curl -X QUERY http://127.0.0.1:8085/events \
 | `query` | yes | A [query](#queries) |
 | `afterSequence` | no | Only events after this Sequence Position. Left out, the read starts at the beginning |
 | `limit` | no | The most events in the page, from 1 to `maxEventsPerPage`. Left out, `defaultEventsPerPage` |
+| `backwards` | no | `true` reads the newest events first. Left out, `false` |
 
 `200 OK`, with an NDJSON body (`application/x-ndjson`), one JSON value per line:
 
@@ -1165,7 +1170,8 @@ curl -X QUERY http://127.0.0.1:8085/events \
 {"hasMore":true}
 ```
 
-- Events come in Sequence Position order. There is no filter on `time`.
+- Events come in Sequence Position order, or newest first with `backwards`. There is no filter on `time`.
+- `backwards` with `afterSequence` gets `400`. A backwards read gives the latest events, in a single page.
 - The last line is the trailer, `{"hasMore": true}` or `{"hasMore": false}`. Tell it apart from an event by its
   `hasMore` key.
 - For the next page, send the same query with `afterSequence` set to the last event's `sequence`.
@@ -1224,8 +1230,17 @@ curl -X QUERY http://127.0.0.1:8085/tx/<txId>/events \
 {"end":true}
 ```
 
-- The body takes `query` only: no `afterSequence`, no `limit`. Every matching event comes back.
+| Key | Required | What it does |
+|---|---|---|
+| `query` | yes | A [query](#queries) |
+| `backwards` | no | `true` reads the newest events first. Left out, `false` |
+| `limit` | no | The most events returned, 1 or more. Left out, every matching event |
+
 - Committed events come first, then the transaction's own pending events, which have no `sequence`.
+- With `backwards`, the pending events come first, newest first, then the committed events, newest first.
+- `limit` counts the pending and committed events together.
+- `limit` doesn't page: the read returns at most `limit` events, and the condition covers the whole query.
+- There is no `afterSequence`.
 - The last line is the trailer, `{"end": true}`.
 - The read opens a condition. The next call must be a write of events.
 - A read cut short leaves the condition open: abandon the transaction and run the command again.
