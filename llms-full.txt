@@ -432,6 +432,7 @@ tamarackdb-backup --default-config >> config.toml
 | `maxReadsPerTx` | `TAMARACKDB_MAX_READS_PER_TX` | `100` | The most reads of events in one transaction |
 | `maxProjectionsPerTx` | `TAMARACKDB_MAX_PROJECTIONS_PER_TX` | `500` | The most projections one transaction writes |
 | `maxProjectionsPerWrite` | `TAMARACKDB_MAX_PROJECTIONS_PER_WRITE` | `500` | The most projections in one `POST /projections` |
+| `maxEventsPerTxRead` | `TAMARACKDB_MAX_EVENTS_PER_TX_READ` | `10000` | The most events one read of a transaction returns |
 | `maxRequestBodySize` | `TAMARACKDB_MAX_REQUEST_BODY_SIZE` | `8388608` (8 MiB) | The largest request body, in bytes |
 | `maxQueuedWrites` | `TAMARACKDB_MAX_QUEUED_WRITES` | `100` | The most writes waiting for their turn at once |
 | `readPoolSize` | `TAMARACKDB_READ_POOL_SIZE` | `8` | How many reads run at once |
@@ -452,6 +453,9 @@ tamarackdb-backup --default-config >> config.toml
   application's data, and use the same ones in production. Every error from a limit names the setting to raise.
 - Every limit must be positive, and `defaultEventsPerPage` can't exceed `maxEventsPerPage`. The server refuses to
   start otherwise.
+- The server loads a read in memory before it sends it. At worst, it holds `readPoolSize` reads at once, each of
+  `maxEventsPerPage` (or `maxEventsPerTxRead`) events of `maxEventSize` bytes: about 5 GiB with the defaults. A page
+  of 10,000 events of about 1 KB takes about 10 MB.
 - A client has one minute to send a request, its body included. Past that, the server closes the connection without
   an answer. This limit is fixed.
 - `txIdleTimeout` only ends transactions the application forgot. A transaction that keeps making calls lives as long
@@ -743,7 +747,8 @@ change from one version to the next.
     "designErrors": 0,
     "paused": 0,
     "busy": 0,
-    "tooMany": 0
+    "tooMany": 0,
+    "largestRead": 2000
   },
   "pause": {
     "state": "normal",
@@ -765,6 +770,9 @@ What to watch:
 - **`transactions.designErrors`** or **`transactions.busy`** above zero: the client library has a bug.
 - **`transactions.tooMany`** above zero: `maxOpenTx` is too low, or the application begins transactions and never
   ends them (see `expired`).
+- **`transactions.largestRead`**, the most events one read of a transaction returned, getting close to
+  `maxEventsPerTxRead`: a decision reads more events as the log grows. Past the setting, its command fails. The log
+  has a `warning` line for each read over half of it.
 - **`pause.state`** stuck at `pauseRequested`: transactions are still open (`openTransactions`), or whoever asked for
   the pause stopped calling `POST /pause`.
 - **`lastOptimizeAt`** more than a day old: the daily `POST /optimize` doesn't run (see
@@ -784,7 +792,8 @@ tamarackdb-server: [WARNING] POST /projections 503 27B 0.07ms
   request.
 - `debug`: a success, or an expected refusal such as a conflict.
 - `info`: a client's mistake, such as a malformed request or a bad token, or a pause, a resume, an optimize, or a bulk delete.
-- `warning`: the write queue is full, or `maxOpenTx` transactions are open.
+- `warning`: the write queue is full, `maxOpenTx` transactions are open, or a read of a transaction returned more than
+  half of `maxEventsPerTxRead` events.
 - `error`: a failure on the server.
 
 ---
@@ -1177,7 +1186,7 @@ curl -X QUERY http://127.0.0.1:8085/events \
 - For the next page, send the same query with `afterSequence` set to the last event's `sequence`.
 - To follow new events, keep polling the same way once `hasMore` is `false`.
 - A page with no trailer was cut short. Resume after the last event fully received.
-- The server gives each line 30 seconds to go out. Read the page as it arrives.
+- The server gives each line 30 seconds to go out. A client that stops reading loses its connection.
 
 ## Transactions
 
@@ -1240,6 +1249,8 @@ curl -X QUERY http://127.0.0.1:8085/tx/<txId>/events \
 - With `backwards`, the pending events come first, newest first, then the committed events, newest first.
 - `limit` counts the pending and committed events together.
 - `limit` doesn't page: the read returns at most `limit` events, and the condition covers the whole query.
+- A read that would return more than `maxEventsPerTxRead` events gets `400`, and the transaction ends. Give a decision
+  a query whose events don't keep growing with the log.
 - There is no `afterSequence`.
 - The last line is the trailer, `{"end": true}`.
 - The read opens a condition. The next call must be a write of events.
@@ -1361,6 +1372,7 @@ around a command, and ignore the response.
 |---|---|
 | `maxEventsPerTx` | The events the transaction writes |
 | `maxReadsPerTx` | Its reads of events |
+| `maxEventsPerTxRead` | The events one read returns, committed and pending together |
 | `maxProjectionsPerTx` | The distinct projections it writes |
 
 The call that would go over gets `400`, with the setting named in the `message`. An event over `maxEventSize`, or a
@@ -1545,7 +1557,7 @@ What a client of the protocol has to do, whatever its language. The calls themse
 - Tell a trailer apart from an event by its shape: a `hasMore` key for `QUERY /events`, an `end` key in a transaction.
 - Treat a response with no trailer as cut short. Outside a transaction, resume after the last full event. In a
   transaction, abandon it and run the command again.
-- Parse a read line by line, as it arrives.
+- Parse a read line by line. Each line has 30 seconds to go out: read at your own pace, but don't stop.
 
 ## Transactions
 
