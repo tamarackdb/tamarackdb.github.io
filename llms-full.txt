@@ -758,7 +758,7 @@ change from one version to the next.
     "openTransactions": 0
   },
   "wal": { "size": 4120032, "checkpoints": 81, "checkpointsBusy": 0 },
-  "errors": { "internal": 0 }
+  "errors": { "internal": 0, "storageFull": 0 }
 }
 ```
 
@@ -784,6 +784,8 @@ What to watch:
 - **`lastOptimizeAt`** more than a day old: the daily `POST /optimize` doesn't run (see
   [Maintenance](https://tamarackdb.github.io/docs/operations/maintenance/#query-statistics)).
 - **`errors.internal`** above zero: a failure on the server. The log has the matching `error` lines.
+- **`errors.storageFull`** above zero: writes were refused because the disk is full, with `507 StorageFull`. Nothing
+  was written. Free space: the next write goes through, with no restart.
 
 ## Logs
 
@@ -800,7 +802,7 @@ tamarackdb-server: [WARNING] POST /projections 503 27B 0.07ms
 - `info`: a client's mistake, such as a malformed request or a bad token, or a pause, a resume, an optimize, or a bulk delete.
 - `warning`: the write queue is full, `maxOpenTx` transactions are open, or a read of a transaction returned more than
   half of `maxEventsPerTxRead` events.
-- `error`: a failure on the server.
+- `error`: a failure on the server, or a write refused because the disk is full.
 
 ---
 
@@ -1543,6 +1545,7 @@ behind a limit.
 | `409` | `TransactionBusy` | A call while another one runs on the same transaction. The transaction goes on |
 | `413` | `PayloadTooLarge` | An event, a projection, or a body over its size limit |
 | `500` | `InternalError` | A failure on the server |
+| `507` | `StorageFull` | A write while the server's disk is full. Nothing was written |
 | `503` | `Paused` | `POST /tx` during a pause |
 | `503` | `TooManyTransactions` | `POST /tx` while `maxOpenTx` transactions are open |
 | `503` | `WriteQueueFull` | A write while too many already wait. Nothing was written |
@@ -1573,6 +1576,8 @@ What a client of the protocol has to do, whatever its language. The calls themse
 - After `409 ConcurrencyException` or `404 TransactionNotFound`, run the whole command again, in a new transaction.
 - `POST /tx` can get `503 Paused`, or `503 TooManyTransactions`. What to do with the command is the application's
   choice.
+- `507 StorageFull` means nothing was written, and the transaction is over. Don't retry on your own: the disk stays
+  full until the operator frees space.
 - Abandon a transaction you no longer need, for example in the error handler around a command, and ignore the
   response.
 - Give each event of a write the `time` the write returned: it's the `time` the event keeps once committed.
