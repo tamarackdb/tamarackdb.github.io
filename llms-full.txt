@@ -453,6 +453,8 @@ tamarackdb-backup --default-config >> config.toml
   application's data, and use the same ones in production. Every error from a limit names the setting to raise.
 - Every limit must be positive, and `defaultEventsPerPage` can't exceed `maxEventsPerPage`. The server refuses to
   start otherwise.
+- Set `defaultEventsPerPage` so that a page reads in under a second. A longer read keeps the WAL file from being
+  emptied (see [Monitoring](https://tamarackdb.github.io/docs/operations/monitoring/#counters)).
 - The server loads a read in memory before it sends it. At worst, it holds `readPoolSize` reads at once, each of
   `maxEventsPerPage` (or `maxEventsPerTxRead`) events of `maxEventSize` bytes: about 5 GiB with the defaults. A page
   of 10,000 events of about 1 KB takes about 10 MB.
@@ -755,6 +757,7 @@ change from one version to the next.
     "since": "2026-10-03T14:00:00.000000Z",
     "openTransactions": 0
   },
+  "wal": { "size": 4120032, "checkpoints": 81, "checkpointsBusy": 0 },
   "errors": { "internal": 0 }
 }
 ```
@@ -775,6 +778,9 @@ What to watch:
   has a `warning` line for each read over half of it.
 - **`pause.state`** stuck at `pauseRequested`: transactions are still open (`openTransactions`), or whoever asked for
   the pause stopped calling `POST /pause`.
+- **`wal.size`** well above 64 MiB, or **`wal.checkpointsBusy`** rising: reads take too long, and keep the WAL from
+  being emptied. `defaultEventsPerPage` or `maxEventsPerPage` is too high. The WAL file is emptied each time it goes
+  past 64 MiB; the write that took it there waits for it, usually under a second.
 - **`lastOptimizeAt`** more than a day old: the daily `POST /optimize` doesn't run (see
   [Maintenance](https://tamarackdb.github.io/docs/operations/maintenance/#query-statistics)).
 - **`errors.internal`** above zero: a failure on the server. The log has the matching `error` lines.
